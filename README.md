@@ -1,36 +1,40 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Notas a tareas
 
-## Getting Started
+App web que transcribe notas escritas a mano (fotos del cuaderno) y las convierte en proyectos y tareas, respetando la simbología personal (`*` proyecto, `→` tarea, `↳` detalle, `//` realizado, `!!` urgente, etc.).
 
-First, run the development server:
+**Fase 1 (esta versión):** foto → transcripción con Claude (visión) → revisión y corrección → exportar a Markdown o JSON.
+**Fase 2 (pendiente):** enviar a Notion e integrar con el dashboard en Vercel.
+
+## Cómo funciona
+
+1. Tomas o subes una o más fotos (acepta HEIC del iPhone). Puedes girarlas para que el texto quede derecho.
+2. El navegador reduce cada foto a 2000 px y la envía a `/api/transcribir` junto con tu glosario.
+3. El servidor llama a Claude (`claude-opus-5-5`) con salida estructurada: páginas → proyectos → tareas → detalles, con estado, marcas y palabras dudosas con alternativas.
+4. Revisas: editas textos, marcas tareas hechas y eliges alternativas para las palabras dudosas.
+
+El glosario de siglas se edita en la app y se guarda en el navegador. El inicial está en `src/lib/glosario.ts`, junto con la simbología.
+
+## Desarrollo local
 
 ```bash
+npm install
+cp .env.example .env.local   # y completa ANTHROPIC_API_KEY
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Desplegar en Vercel
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+1. Sube este repositorio a GitHub e impórtalo en Vercel (framework: Next.js, sin configuración extra).
+2. En *Settings → Environment Variables* agrega:
+   - `ANTHROPIC_API_KEY`: tu clave de https://console.anthropic.com
+   - `APP_PASSWORD` (recomendado): una clave para que solo tú puedas usar la app; la app la pide la primera vez y la recuerda.
+3. Despliega. La función de transcripción permite hasta 300 s (`maxDuration`).
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Estructura
 
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `src/app/page.tsx`: interfaz (captura, revisión, exportación).
+- `src/app/api/transcribir/route.ts`: llamada a Claude.
+- `src/lib/esquema.ts`: esquema de datos (Zod), base para la fase de Notion.
+- `src/lib/glosario.ts`: glosario y simbología.
+- `src/lib/imagen.ts`: conversión HEIC, reducción y rotación en el navegador.
+- `src/lib/exportar.ts`: exportación a Markdown.
