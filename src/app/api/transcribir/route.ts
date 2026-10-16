@@ -1,6 +1,6 @@
 import { ApiError, GoogleGenAI } from "@google/genai";
 import { z } from "zod";
-import { Transcripcion } from "@/lib/esquema";
+import { Reconocimiento } from "@/lib/esquema";
 import { SIMBOLOGIA } from "@/lib/glosario";
 
 export const runtime = "nodejs";
@@ -19,21 +19,21 @@ const esperar = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 type Imagen = { data: string; media_type: "image/jpeg" | "image/png" | "image/webp" };
 
-const SISTEMA = `Transcribes páginas de un cuaderno escrito a mano en español (Chile) y las conviertes en proyectos y tareas.
+const SISTEMA = `Transcribes texto escrito a mano en español (Chile): notas hechas con lápiz en un iPad o fotos de un cuaderno.
 
-La persona usa esta simbología:
+La persona suele usar estos símbolos; transcríbelos con el carácter más parecido (*, →, ↳, //, ✓, ?, !!, ↗):
 ${SIMBOLOGIA}
 
 Cómo trabajar:
-- La foto puede venir girada o con dos páginas abiertas; lee cada página por separado, de izquierda a derecha.
-- Mantén el orden y la jerarquía del cuaderno: cada * es un proyecto, cada → o ↳ bajo él es una tarea, y lo que cuelga de una tarea va en "detalles".
-- Las marcas de estado se escriben encima o al final de la línea. "//" o "✓✓" al final de una línea significa realizado.
-- Usa el glosario para reconocer nombres propios y siglas. En "texto" deja la sigla como está escrita; en "texto_expandido" escríbela completa.
-- Cuando una palabra no se lea con seguridad, escribe tu mejor lectura en el texto y regístrala en "dudas" con sus alternativas. No inventes contenido que no está en la página.
-- Ignora las marcas que se transparentan desde la otra cara de la hoja.`;
+- Transcribe de forma literal: no resumas, no reordenes, no corrijas el estilo ni agregues nada que no esté escrito.
+- Respeta los saltos de línea y la sangría de cada línea (usa espacios para la sangría).
+- Si la imagen viene girada, léela igual en el orden correcto.
+- Usa el glosario para reconocer nombres propios y siglas; déjalas tal como están escritas, sin expandirlas.
+- Cuando una palabra no se lea con seguridad, escribe tu mejor lectura en el texto y regístrala en "dudas" con sus alternativas.
+- Ignora tachones, garabatos sueltos y marcas que se transparentan desde la otra cara de la hoja.`;
 
 // Gemini no necesita la clave $schema del JSON Schema generado por Zod.
-const ESQUEMA_JSON: Record<string, unknown> = z.toJSONSchema(Transcripcion);
+const ESQUEMA_JSON: Record<string, unknown> = z.toJSONSchema(Reconocimiento);
 delete ESQUEMA_JSON.$schema;
 
 export async function POST(req: Request) {
@@ -67,7 +67,7 @@ export async function POST(req: Request) {
             role: "user",
             parts: [
               ...imagenes.map((img) => ({ inlineData: { mimeType: img.media_type, data: img.data } })),
-              { text: `Glosario de siglas y nombres frecuentes:\n${cuerpo.glosario ?? ""}\n\nTranscribe estas páginas.` },
+              { text: `Glosario de siglas y nombres frecuentes:\n${cuerpo.glosario ?? ""}\n\nTranscribe el texto manuscrito.` },
             ],
           },
         ],
@@ -110,7 +110,7 @@ export async function POST(req: Request) {
         { status: 502 },
       );
     }
-    const resultado = Transcripcion.safeParse(json);
+    const resultado = Reconocimiento.safeParse(json);
     if (!resultado.success) {
       return Response.json({ error: "La respuesta no tuvo el formato esperado. Intenta de nuevo." }, { status: 502 });
     }

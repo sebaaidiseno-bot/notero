@@ -1,18 +1,21 @@
-# Notas a tareas
+# Notero
 
-App web que transcribe notas escritas a mano (fotos del cuaderno) y las convierte en proyectos y tareas, respetando la simbología personal (`*` proyecto, `→` tarea, `↳` detalle, `//` realizado, `!!` urgente, etc.).
-
-**Fase 1 (esta versión):** foto → transcripción con Gemini (visión) → revisión y corrección → exportar a Markdown o JSON.
-**Fase 2 (pendiente):** enviar a Notion e integrar con el dashboard en Vercel.
+App web para escribir a mano alzada en el iPad (con Apple Pencil) y convertirlo en texto. También convierte fotos de páginas manuscritas.
 
 ## Cómo funciona
 
-1. Tomas o subes una o más fotos (acepta HEIC del iPhone). Puedes girarlas para que el texto quede derecho.
-2. El navegador reduce cada foto a 2000 px y la envía a `/api/transcribir` junto con tu glosario.
-3. El servidor llama a Gemini (`gemini-3.8-flash` por defecto, cambiable con `GEMINI_MODEL`) con salida estructurada: páginas → proyectos → tareas → detalles, con estado, marcas y palabras dudosas con alternativas.
-4. Revisas: editas textos, marcas tareas hechas y eliges alternativas para las palabras dudosas.
+1. Escribes en la hoja con el lápiz. Mientras usas el lápiz, los toques con la mano se ignoran (rechazo de palma).
+2. "Convertir a texto" recorta lo escrito, lo envía como imagen a `/api/transcribir` y Gemini devuelve la transcripción literal (respetando líneas y símbolos como `*`, `→`, `↳`, `//`).
+3. El texto se suma a la casilla de abajo (se guarda en el navegador), se puede editar y copiar. Las palabras dudosas aparecen con alternativas para elegir.
+4. "Convertir una foto" hace lo mismo con una foto (acepta HEIC del iPhone).
 
-El glosario de siglas se edita en la app y se guarda en el navegador. El inicial está en `src/lib/glosario.ts`, junto con la simbología.
+El glosario de siglas y nombres (`src/lib/glosario.ts`, editable en la app) ayuda a leer nombres propios.
+
+## Variables de entorno (Vercel → Settings → Environment Variables)
+
+- `GEMINI_API_KEY`: clave de https://aistudio.google.com ("Get API key"). Sin facturación es gratis con límite diario; en ese plan Google puede usar el contenido enviado para mejorar sus productos.
+- `APP_PASSWORD` (recomendado): contraseña para usar la app; se pide la primera vez y queda recordada.
+- `GEMINI_MODEL` (opcional): modelo preferido. Por defecto `gemini-3.8-flash`; si está saturado se prueban `gemini-3.6-flash` y `gemini-3.5-flash-lite`.
 
 ## Desarrollo local
 
@@ -22,24 +25,14 @@ cp .env.example .env.local   # y completa GEMINI_API_KEY
 npm run dev
 ```
 
-## Desplegar en Vercel
-
-1. Sube este repositorio a GitHub e impórtalo en Vercel (framework: Next.js, sin configuración extra).
-2. En *Settings → Environment Variables* agrega:
-   - `GEMINI_API_KEY`: clave de https://aistudio.google.com (botón "Get API key"). Sin facturación es gratis con límite diario; en ese plan Google puede usar el contenido enviado para mejorar sus productos.
-   - `GEMINI_MODEL` (opcional): otro modelo de Gemini, por ejemplo uno Pro.
-   - `APP_PASSWORD` (recomendado): una clave para que solo tú puedas usar la app; la app la pide la primera vez y la recuerda.
-3. Despliega. La función de transcripción permite hasta 300 s (`maxDuration`).
-
 ## Estructura
 
-- `src/app/page.tsx`: interfaz (captura, revisión, exportación).
-- `src/app/api/transcribir/route.ts`: llamada a Gemini.
-- `src/lib/esquema.ts`: esquema de datos (Zod), base para la fase de Notion.
-- `src/lib/glosario.ts`: glosario y simbología.
-- `src/lib/imagen.ts`: conversión HEIC, reducción y rotación en el navegador.
-- `src/lib/exportar.ts`: exportación a Markdown.
+- `src/app/page.tsx`: pantalla principal (hoja, texto, glosario).
+- `src/components/Lienzo.tsx`: hoja para escribir con lápiz (presión, rechazo de palma, deshacer, exportar).
+- `src/app/api/transcribir/route.ts`: llamada a Gemini con reintentos y modelos de respaldo.
+- `src/lib/esquema.ts`: formato de la respuesta (texto y palabras dudosas).
+- `src/lib/imagen.ts`: conversión HEIC y reducción de fotos.
 
-## Usar en iPad o iPhone
+## Usar en iPad
 
-Abre la dirección de Vercel en Safari. "Tomar foto" abre la cámara y "Subir fotos" la galería (HEIC funciona directo). Para tenerla como app: Compartir → "Agregar a pantalla de inicio".
+Abre la dirección de Vercel en Safari → Compartir → "Agregar a pantalla de inicio".

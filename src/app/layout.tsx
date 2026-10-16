@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Notas a tareas",
-  description: "Transcribe notas escritas a mano y las convierte en tareas.",
+  title: "Notero",
+  description: "Escribe a mano en el iPad y conviértelo en texto.",
 };
 
 export default function RootLayout({
