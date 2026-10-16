@@ -1,12 +1,12 @@
-import Anthropic from "@anthropic-ai/sdk";
-import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
+import { ApiError, GoogleGenAI } from "@google/genai";
+import { z } from "zod";
 import { Transcripcion } from "@/lib/esquema";
 import { SIMBOLOGIA } from "@/lib/glosario";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-const client = new Anthropic();
+const MODELO = process.env.GEMINI_MODEL || "gemini-3.8-flash";
 
 type Imagen = { data: string; media_type: "image/jpeg" | "image/png" | "image/webp" };
 
@@ -23,14 +23,17 @@ Cómo trabajar:
 - Cuando una palabra no se lea con seguridad, escribe tu mejor lectura en el texto y regístrala en "dudas" con sus alternativas. No inventes contenido que no está en la página.
 - Ignora las marcas que se transparentan desde la otra cara de la hoja.`;
 
+// Gemini no necesita la clave $schema del JSON Schema generado por Zod.
+const ESQUEMA_JSON: Record<string, unknown> = z.toJSONSchema(Transcripcion);
+delete ESQUEMA_JSON.$schema;
+
 export async function POST(req: Request) {
   const claveApp = process.env.APP_PASSWORD;
   if (claveApp && req.headers.get("x-app-password") !== claveApp) {
     return Response.json({ error: "Clave de acceso incorrecta." }, { status: 401 });
   }
-
-  if (!process.env.ANTHROPIC_API_KEY) {
-    return Response.json({ error: "Falta configurar ANTHROPIC_API_KEY en el servidor." }, { status: 500 });
+  if (!process.env.GEMINI_API_KEY) {
+    return Response.json({ error: "Falta configurar GEMINI_API_KEY en el servidor." }, { status: 500 });
   }
 
   let cuerpo: { imagenes?: Imagen[]; glosario?: string };
@@ -44,52 +47,55 @@ export async function POST(req: Request) {
     return Response.json({ error: "Envía entre 1 y 6 imágenes." }, { status: 400 });
   }
 
-  const contenido: Anthropic.Beta.BetaContentBlockParam[] = [
-    ...imagenes.map(
-      (img): Anthropic.Beta.BetaImageBlockParam => ({
-        type: "image",
-        source: { type: "base64", media_type: img.media_type, data: img.data },
-      }),
-    ),
-    {
-      type: "text",
-      text: `Glosario de siglas y nombres frecuentes:\n${cuerpo.glosario ?? ""}\n\nTranscribe estas páginas.`,
-    },
-  ];
+  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
   try {
-    const respuesta = await client.beta.messages.parse({
-      model: "claude-opus-5-5",
-      max_tokens: 16000,
-      output_config: { effort: "high", format: betaZodOutputFormat(Transcripcion) },
-      betas: ["server-side-fallback-2026-07-01"],
-      fallbacks: "default",
-      system: SISTEMA,
-      messages: [{ role: "user", content: contenido }],
+    const respuesta = await ai.models.generateContent({
+      model: MODELO,
+      contents: [
+        {
+          role: "user",
+          parts: [
+            ...imagenes.map((img) => ({ inlineData: { mimeType: img.media_type, data: img.data } })),
+            { text: `Glosario de siglas y nombres frecuentes:\n${cuerpo.glosario ?? ""}\n\nTranscribe estas páginas.` },
+          ],
+        },
+      ],
+      config: {
+        systemInstruction: SISTEMA,
+        responseMimeType: "application/json",
+        responseJsonSchema: ESQUEMA_JSON,
+      },
     });
 
-    if (respuesta.stop_reason === "refusal") {
-      return Response.json({ error: "El modelo no pudo procesar esta imagen." }, { status: 422 });
+    const texto = respuesta.text;
+    if (!texto) {
+      const motivo = respuesta.candidates?.[0]?.finishReason ?? respuesta.promptFeedback?.blockReason;
+      return Response.json({ error: `El modelo no devolvió texto (${motivo ?? "sin motivo"}).` }, { status: 502 });
     }
-    if (respuesta.stop_reason === "max_tokens" || !respuesta.parsed_output) {
+    let json: unknown;
+    try {
+      json = JSON.parse(texto);
+    } catch {
       return Response.json(
         { error: "La respuesta quedó incompleta. Prueba con menos páginas por foto." },
         { status: 502 },
       );
     }
-    return Response.json({ resultado: respuesta.parsed_output });
+    const resultado = Transcripcion.safeParse(json);
+    if (!resultado.success) {
+      return Response.json({ error: "La respuesta no tuvo el formato esperado. Intenta de nuevo." }, { status: 502 });
+    }
+    return Response.json({ resultado: resultado.data });
   } catch (error) {
-    if (error instanceof Anthropic.AuthenticationError) {
-      return Response.json({ error: "Falta o es inválida la ANTHROPIC_API_KEY del servidor." }, { status: 500 });
-    }
-    if (error instanceof Anthropic.RateLimitError) {
-      return Response.json({ error: "Límite de uso alcanzado; intenta en un minuto." }, { status: 429 });
-    }
-    if (error instanceof Anthropic.BadRequestError) {
-      return Response.json({ error: `Solicitud rechazada: ${error.message}` }, { status: 400 });
-    }
-    if (error instanceof Anthropic.APIError) {
-      return Response.json({ error: `Error de la API (${error.status}).` }, { status: 502 });
+    if (error instanceof ApiError) {
+      if (error.status === 400 || error.status === 401 || error.status === 403) {
+        return Response.json({ error: `Gemini rechazó la solicitud (${error.status}): revisa la clave y el modelo.` }, { status: 502 });
+      }
+      if (error.status === 429) {
+        return Response.json({ error: "Se alcanzó el límite gratuito de Gemini; intenta más tarde." }, { status: 429 });
+      }
+      return Response.json({ error: `Error de Gemini (${error.status}).` }, { status: 502 });
     }
     throw error;
   }
