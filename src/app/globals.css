@@ -51,33 +51,13 @@ textarea,
   user-select: text;
 }
 
-/* Hoja para escribir: el papel es solo fondo (no sale en la imagen enviada) y sin gestos del navegador.
-   36 px ≈ 7 mm en la pantalla de un iPad. */
+/* Hoja para escribir: el papel se dibuja en el lienzo (sigue el zoom); aquí solo el fondo y sin gestos del navegador. */
 .hoja {
-  --paso: 36px;
-  --trazo-papel: rgb(0 0 0 / 0.08);
-  --punto-papel: rgb(0 0 0 / 0.28);
   touch-action: none;
   background-color: #fffefa;
 }
 @media (prefers-color-scheme: dark) {
   .hoja {
-    --trazo-papel: rgb(255 255 255 / 0.09);
-    --punto-papel: rgb(255 255 255 / 0.3);
     background-color: #1d1c1a;
   }
-}
-.papel-lineas {
-  background-image: repeating-linear-gradient(to bottom, transparent 0 calc(var(--paso) - 1px), var(--trazo-papel) calc(var(--paso) - 1px) var(--paso));
-}
-.papel-cuadricula {
-  background-image:
-    linear-gradient(to bottom, var(--trazo-papel) 1px, transparent 1px),
-    linear-gradient(to right, var(--trazo-papel) 1px, transparent 1px);
-  background-size: var(--paso) var(--paso);
-}
-.papel-puntos {
-  background-image: radial-gradient(circle, var(--punto-papel) 1.3px, transparent 1.8px);
-  background-size: var(--paso) var(--paso);
-  background-position: calc(var(--paso) / 2) calc(var(--paso) / 2);
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Hoja, { type EstadoHistorial, type HojaApi } from "@/components/Hoja";
+import Hoja, { type EstadoHoja, type HojaApi, type Vista } from "@/components/Hoja";
 import type { Bloque } from "@/lib/esquema";
 import { aBlobLegible, prepararJpeg } from "@/lib/imagen";
 import { textoDelDocumento } from "@/lib/hoja/texto";
@@ -11,6 +11,8 @@ const CLAVE_ACCESO = "notero:clave";
 const CLAVE_HOJA = "notero:hoja";
 const CLAVE_AUTOMATICO = "notero:automatico";
 const CLAVE_PAPEL = "notero:papel";
+const CLAVE_VISTA = "notero:vista";
+const VISTA_NORMAL: Vista = { s: 1, x: 0, y: 0 };
 
 const COLORES: { valor: Color; nombre: string; muestra: string }[] = [
   { valor: "negro", nombre: "Negro", muestra: "bg-neutral-900 dark:bg-neutral-100" },
@@ -45,8 +47,15 @@ export default function Inicio() {
   const inputFoto = useRef<HTMLInputElement>(null);
   const [inicial, setInicial] = useState<Documento | null>(null);
   const [texto, setTexto] = useState("");
-  const [historial, setHistorial] = useState<EstadoHistorial>({ puedeDeshacer: false, puedeRehacer: false });
-  const [automatico, setAutomatico] = useState(true);
+  const [estado, setEstado] = useState<EstadoHoja>({
+    puedeDeshacer: false,
+    puedeRehacer: false,
+    pendientes: 0,
+    convirtiendo: false,
+  });
+  const [vistaInicial, setVistaInicial] = useState<Vista>(VISTA_NORMAL);
+  const [zoom, setZoom] = useState(1);
+  const [automatico, setAutomatico] = useState(false);
   const [color, setColor] = useState<Color>("negro");
   const [papel, setPapel] = useState<Papel>("cuadricula");
   const [claveAcceso, setClaveAcceso] = useState("");
@@ -63,7 +72,14 @@ export default function Inicio() {
   useEffect(() => {
     const c = leerLocal(CLAVE_ACCESO);
     if (c) setClaveAcceso(c);
-    if (leerLocal(CLAVE_AUTOMATICO) === "no") setAutomatico(false);
+    if (leerLocal(CLAVE_AUTOMATICO) === "si") setAutomatico(true);
+    try {
+      const v = JSON.parse(leerLocal(CLAVE_VISTA) ?? "null");
+      if (v && typeof v.s === "number") {
+        setVistaInicial(v);
+        setZoom(v.s);
+      }
+    } catch {}
     const p = leerLocal(CLAVE_PAPEL);
     if (p && PAPELES.some((x) => x.valor === p)) setPapel(p as Papel);
     let doc = DOCUMENTO_VACIO;
@@ -126,7 +142,7 @@ export default function Inicio() {
     <main className="mx-auto max-w-5xl px-4 py-4 sm:py-6">
       <header className="mb-3 flex items-baseline gap-3">
         <h1 className="text-2xl font-semibold tracking-tight">Notero</h1>
-        <p className="text-sm opacity-60">Escribe a mano: al hacer una pausa, la tinta se convierte en texto.</p>
+        <p className="text-sm opacity-60">Escribe y dibuja a mano; convierte la escritura en texto cuando quieras.</p>
       </header>
 
       <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -162,10 +178,10 @@ export default function Inicio() {
           ))}
         </select>
 
-        <button className="boton" aria-label="Deshacer" disabled={!historial.puedeDeshacer} onClick={() => hoja.current?.deshacer()}>
+        <button className="boton" aria-label="Deshacer" disabled={!estado.puedeDeshacer} onClick={() => hoja.current?.deshacer()}>
           ↶ Deshacer
         </button>
-        <button className="boton" aria-label="Rehacer" disabled={!historial.puedeRehacer} onClick={() => hoja.current?.rehacer()}>
+        <button className="boton" aria-label="Rehacer" disabled={!estado.puedeRehacer} onClick={() => hoja.current?.rehacer()}>
           Rehacer ↷
         </button>
 
@@ -182,11 +198,13 @@ export default function Inicio() {
             />
             Convertir al pausar
           </label>
-          {!automatico && (
-            <button className="boton-primario" onClick={() => hoja.current?.convertirAhora()}>
-              Convertir ahora
-            </button>
-          )}
+          <button
+            className="boton-primario"
+            disabled={estado.convirtiendo || estado.pendientes === 0}
+            onClick={() => hoja.current?.convertirAhora()}
+          >
+            {estado.convirtiendo ? "Convirtiendo…" : "Convertir a texto"}
+          </button>
           <button
             className="boton"
             onClick={() => {
@@ -203,21 +221,33 @@ export default function Inicio() {
           <Hoja
             ref={hoja}
             inicial={inicial}
+            vistaInicial={vistaInicial}
             automatico={automatico}
             color={color}
             papel={papel}
             reconocer={(pngs) => reconocer(pngs.map((data) => ({ data, media_type: "image/png" })))}
-            onCambio={(doc, h) => {
+            onCambio={(doc, e) => {
               guardarLocal(CLAVE_HOJA, JSON.stringify(doc));
               setTexto(textoDelDocumento(doc));
-              setHistorial(h);
+              setEstado(e);
+            }}
+            onVista={(v) => {
+              guardarLocal(CLAVE_VISTA, JSON.stringify(v));
+              setZoom(v.s);
             }}
             onError={setError}
             onAviso={mostrarAviso}
           />
         ) : (
-          <div className={`hoja papel-${papel} h-[72vh] min-h-96 rounded-xl border border-black/10 dark:border-white/10`} />
+          <div className="hoja h-[72vh] min-h-96 rounded-xl border border-black/10 dark:border-white/10" />
         )}
+        <button
+          className="absolute bottom-3 right-3 rounded-full border border-black/10 bg-white/90 px-3 py-1 text-xs shadow-sm dark:border-white/10 dark:bg-neutral-800/90"
+          title="Volver al 100 % y al inicio de la hoja"
+          onClick={() => hoja.current?.vistaNormal()}
+        >
+          {Math.round(zoom * 100)} %
+        </button>
         {aviso && (
           <div className="pointer-events-none absolute left-1/2 top-4 -translate-x-1/2 rounded-full bg-neutral-900/85 px-4 py-1.5 text-sm text-white dark:bg-white/90 dark:text-neutral-900">
             {aviso}
@@ -228,11 +258,12 @@ export default function Inicio() {
       <details className="mt-2 text-xs opacity-70">
         <summary className="cursor-pointer">Gestos</summary>
         <ul className="mt-1 list-disc space-y-0.5 pl-5">
-          <li>Lápiz: escribe y dibuja. Al hacer una pausa, cada renglón escrito se convierte en texto.</li>
+          <li>Lápiz: escribe y dibuja. “Convertir a texto” transforma toda la escritura de la hoja de una vez (o activa “Convertir al pausar” para que lo haga en cada pausa).</li>
+          <li>Dos dedos: sepáralos o júntalos para hacer zoom; muévelos juntos para desplazarte por la hoja. El botón con el porcentaje vuelve al 100 %.</li>
           <li>Para una forma perfecta, al terminar el trazo deja el lápiz quieto medio segundo: círculo, rectángulo, triángulo, rombo, línea o flecha.</li>
           <li>Para una flecha: dibuja la línea con la punta en el mismo trazo, o una línea y luego una “V” en un extremo (manteniendo el lápiz quieto al terminar).</li>
           <li>Tacha en zigzag sobre algo para borrarlo. Una raya horizontal sobre un texto convertido lo borra.</li>
-          <li>Dedo: arrastra formas y textos para moverlos; toca un texto para corregirlo; desliza a la izquierda para deshacer y a la derecha para rehacer.</li>
+          <li>Un dedo: arrastra formas y textos para moverlos; toca un texto para corregirlo; desliza a la izquierda para deshacer y a la derecha para rehacer.</li>
           <li>Con el Apple Pencil, la mano apoyada no dibuja.</li>
         </ul>
       </details>

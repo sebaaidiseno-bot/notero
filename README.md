@@ -6,7 +6,8 @@ App web para escribir a mano alzada en el iPad (con Apple Pencil) y convertirlo 
 
 Inspirada en la tinta interactiva de MyScript, pero con Gemini como lector de escritura:
 
-- **Conversión en el lugar:** al hacer una pausa de 1,5 s, la tinta se agrupa en renglones, se envía a Gemini (una sola solicitud por pausa) y cada renglón se reemplaza por texto en el mismo sitio. La tinta muy alta (bocetos) no se envía. Se puede desactivar ("Convertir al pausar") y convertir a mano.
+- **Conversión en el lugar:** "Convertir a texto" agrupa toda la tinta de la hoja en renglones, la envía a Gemini en una sola solicitud (con razonamiento bajo, para que responda rápido) y reemplaza cada renglón por texto en el mismo sitio. La tinta muy alta (bocetos) no se envía. Opcionalmente, "Convertir al pausar" lo hace tras cada pausa de 1,5 s.
+- **Hoja grande con zoom:** dos dedos separándose o juntándose hacen zoom (25 % a 400 %); moviéndolos juntos se desplaza la hoja. En computador, rueda o trackpad desplazan y Ctrl + rueda hace zoom. El indicador de porcentaje vuelve al 100 %.
 - **Formas:** al terminar un trazo, dejar el lápiz quieto medio segundo lo convierte en círculo/elipse, rectángulo, triángulo, rombo, línea o flecha (reconocido en el propio dispositivo). Una "V" sostenida junto al extremo de una línea la vuelve flecha.
 - **Gestos con el lápiz:** tachar en zigzag borra lo que esté debajo; una raya horizontal sobre texto convertido lo borra; tocar un texto abre un editor con alternativas.
 - **Gestos con el dedo** (cuando se usa Apple Pencil): arrastrar formas y textos para moverlos, tocar un texto para editarlo, deslizar a la izquierda para deshacer y a la derecha para rehacer. La mano apoyada no dibuja.

@@ -34,18 +34,24 @@ export type HojaApi = {
   rehacer: () => void;
   nuevaHoja: () => void;
   convertirAhora: () => void;
+  vistaNormal: () => void;
 };
 
-export type EstadoHistorial = { puedeDeshacer: boolean; puedeRehacer: boolean };
+export type EstadoHoja = { puedeDeshacer: boolean; puedeRehacer: boolean; pendientes: number; convirtiendo: boolean };
+
+/** Vista de la hoja: pantalla = mundo × s + (x, y). */
+export type Vista = { s: number; x: number; y: number };
 
 type Props = {
   ref: Ref<HojaApi>;
   inicial: Documento;
+  vistaInicial: Vista;
   automatico: boolean;
   color: Color;
   papel: Papel;
   reconocer: (imagenesPng: string[]) => Promise<Bloque[]>;
-  onCambio: (doc: Documento, historial: EstadoHistorial) => void;
+  onCambio: (doc: Documento, estado: EstadoHoja) => void;
+  onVista: (vista: Vista) => void;
   onError: (mensaje: string) => void;
   onAviso: (mensaje: string) => void;
 };
@@ -56,6 +62,9 @@ const ESPERA_FORMA_MS = 500; // lápiz quieto al final del trazo para convertirl
 const TOLERANCIA_QUIETO = 4;
 const ALTO_MAX_RENGLON = 150; // tinta más alta se considera dibujo y no se envía a Gemini
 const DESLIZ_MIN = 90;
+const PASO_PAPEL = 36; // ≈ 7 mm en un iPad al 100 %
+const ZOOM_MIN = 0.25;
+const ZOOM_MAX = 4;
 const FUENTE = "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif";
 const LADO_MAXIMO_EXPORT = 1600;
 const MARGEN_EXPORT = 16;
@@ -186,6 +195,8 @@ type TrazoEnCurso = {
   flechaDe: { lineaId: string; extremo: 0 | 1 } | null;
 };
 
+type Pellizco = { s0: number; x0: number; y0: number; medio0: Xy; d0: number };
+
 type Dedo = {
   id: number;
   x: number;
@@ -194,7 +205,19 @@ type Dedo = {
   arrastre: { elementoId: string; original: Elemento; guardado: boolean } | null;
 };
 
-export default function Hoja({ ref, inicial, automatico, color, papel, reconocer, onCambio, onError, onAviso }: Props) {
+export default function Hoja({
+  ref,
+  inicial,
+  vistaInicial,
+  automatico,
+  color,
+  papel,
+  reconocer,
+  onCambio,
+  onVista,
+  onError,
+  onAviso,
+}: Props) {
   const contenedor = useRef<HTMLDivElement>(null);
   const lienzo = useRef<HTMLCanvasElement>(null);
   const doc = useRef<Documento>(inicial);
@@ -208,12 +231,16 @@ export default function Hoja({ ref, inicial, automatico, color, papel, reconocer
   const temporizador = useRef<ReturnType<typeof setTimeout> | null>(null);
   const temporizadorForma = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ultimaLinea = useRef<string | null>(null);
-  const props = useRef({ automatico, color });
+  const props = useRef({ automatico, color, papel });
+  const vista = useRef<Vista>(vistaInicial);
+  const toques = useRef(new Map<number, Xy>());
+  const pellizco = useRef<Pellizco | null>(null);
+  const ignorarDedos = useRef(false);
   const [editando, setEditando] = useState<string | null>(null);
   const editandoRef = useRef<string | null>(null);
   const [, refrescar] = useState(0);
 
-  props.current = { automatico, color };
+  props.current = { automatico, color, papel };
   editandoRef.current = editando;
 
   function oscuro() {
@@ -225,6 +252,46 @@ export default function Hoja({ ref, inicial, automatico, color, papel, reconocer
     return oscuro() ? def.oscuro : def.claro;
   }
 
+  function dibujarPapel(ctx: CanvasRenderingContext2D, w: number, h: number) {
+    const { s, x, y } = vista.current;
+    const paso = PASO_PAPEL * s;
+    if (props.current.papel === "blanco" || paso < 7) return;
+    const tinte = oscuro() ? "255 255 255" : "0 0 0";
+    const inicioX = ((x % paso) + paso) % paso;
+    const inicioY = ((y % paso) + paso) % paso;
+    if (props.current.papel === "puntos") {
+      ctx.fillStyle = `rgb(${tinte} / 0.3)`;
+      const r = Math.max(0.8, 1.3 * Math.min(s, 1.5));
+      for (let px = inicioX; px < w; px += paso)
+        for (let py = inicioY; py < h; py += paso) {
+          ctx.beginPath();
+          ctx.arc(px, py, r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      return;
+    }
+    ctx.strokeStyle = `rgb(${tinte} / 0.09)`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let py = inicioY; py < h; py += paso) {
+      ctx.moveTo(0, Math.round(py) + 0.5);
+      ctx.lineTo(w, Math.round(py) + 0.5);
+    }
+    if (props.current.papel === "cuadricula")
+      for (let px = inicioX; px < w; px += paso) {
+        ctx.moveTo(Math.round(px) + 0.5, 0);
+        ctx.lineTo(Math.round(px) + 0.5, h);
+      }
+    ctx.stroke();
+  }
+
+  /** Deja el contexto con la transformación del mundo (para seguir dibujando el trazo en curso). */
+  function aplicarVista(ctx: CanvasRenderingContext2D) {
+    const dpr = window.devicePixelRatio || 1;
+    const { s, x, y } = vista.current;
+    ctx.setTransform(dpr * s, 0, 0, dpr * s, dpr * x, dpr * y);
+  }
+
   function dibujar() {
     const c = lienzo.current;
     if (!c) return;
@@ -232,6 +299,8 @@ export default function Hoja({ ref, inicial, automatico, color, papel, reconocer
     const dpr = window.devicePixelRatio || 1;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, c.width, c.height);
+    dibujarPapel(ctx, c.width / dpr, c.height / dpr);
+    aplicarVista(ctx);
     for (const e of doc.current.elementos) {
       prepararPincel(ctx, pintura(e.color));
       if (e.tipo === "forma") trazarForma(ctx, e);
@@ -253,8 +322,27 @@ export default function Hoja({ ref, inicial, automatico, color, papel, reconocer
 
   function avisar() {
     dibujar();
-    onCambio(doc.current, { puedeDeshacer: pasado.current.length > 0, puedeRehacer: futuro.current.length > 0 });
+    onCambio(doc.current, {
+      puedeDeshacer: pasado.current.length > 0,
+      puedeRehacer: futuro.current.length > 0,
+      pendientes: doc.current.tinta.filter((t) => !noLegibles.current.has(t.id)).length,
+      convirtiendo: enVuelo.current.size > 0,
+    });
     refrescar((n) => n + 1);
+  }
+
+  function cambiarVista(nueva: Vista) {
+    vista.current = { ...nueva, s: Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, nueva.s)) };
+    dibujar();
+    onVista(vista.current);
+    refrescar((n) => n + 1);
+  }
+
+  /** Zoom manteniendo fijo el punto de pantalla (px, py). */
+  function zoomEn(px: number, py: number, nuevaEscala: number) {
+    const { s, x, y } = vista.current;
+    const s2 = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, nuevaEscala));
+    cambiarVista({ s: s2, x: px - ((px - x) / s) * s2, y: py - ((py - y) / s) * s2 });
   }
 
   function guardarEstado() {
@@ -297,9 +385,18 @@ export default function Hoja({ ref, inicial, automatico, color, papel, reconocer
     observador.observe(c);
     const tema = window.matchMedia("(prefers-color-scheme: dark)");
     tema.addEventListener("change", dibujar);
+    // En computador: rueda o trackpad desplazan; con Ctrl (o pellizco en trackpad) hacen zoom.
+    const rueda = (e: WheelEvent) => {
+      e.preventDefault();
+      const r = c.getBoundingClientRect();
+      if (e.ctrlKey) zoomEn(e.clientX - r.left, e.clientY - r.top, vista.current.s * Math.exp(-e.deltaY * 0.01));
+      else cambiarVista({ ...vista.current, x: vista.current.x - e.deltaX, y: vista.current.y - e.deltaY });
+    };
+    c.addEventListener("wheel", rueda, { passive: false });
     return () => {
       observador.disconnect();
       tema.removeEventListener("change", dibujar);
+      c.removeEventListener("wheel", rueda);
       if (temporizador.current) clearTimeout(temporizador.current);
       if (temporizadorForma.current) clearTimeout(temporizadorForma.current);
     };
@@ -325,9 +422,9 @@ export default function Hoja({ ref, inicial, automatico, color, papel, reconocer
       g.forEach((t) => noLegibles.current.add(t.id));
       return false;
     });
-    if (grupos.length === 0) return;
+    if (grupos.length === 0) return avisar();
     for (const g of grupos) for (const t of g) enVuelo.current.add(t.id);
-    dibujar();
+    avisar();
     try {
       const bloques = await reconocer(grupos.map(exportarPng));
       const vivos = new Set(doc.current.tinta.map((t) => t.id));
@@ -383,21 +480,32 @@ export default function Hoja({ ref, inicial, automatico, color, papel, reconocer
     },
     convertirAhora() {
       if (temporizador.current) clearTimeout(temporizador.current);
+      noLegibles.current.clear(); // al pedirlo a mano, se reintenta todo lo que quedó como tinta
       void convertirPendiente();
+    },
+    vistaNormal() {
+      cambiarVista({ s: 1, x: 0, y: 0 });
     },
   }));
 
-  function puntoDe(e: { clientX: number; clientY: number; pointerType: string; pressure: number }): Punto {
+  function enPantalla(e: { clientX: number; clientY: number }): Xy {
     const r = lienzo.current!.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  function puntoDe(e: { clientX: number; clientY: number; pointerType: string; pressure: number }): Punto {
+    const { x, y } = enPantalla(e);
+    const v = vista.current;
     const p = e.pointerType === "mouse" || e.pressure === 0 ? 0.5 : e.pressure;
-    return { x: e.clientX - r.left, y: e.clientY - r.top, p };
+    return { x: (x - v.x) / v.s, y: (y - v.y) / v.s, p };
   }
 
   function elementoEn(x: number, y: number, soloTexto = false) {
     const candidatos = doc.current.elementos.filter((e) => !soloTexto || e.tipo === "texto");
     return [...candidatos].reverse().find((e) => {
       const c = cajaDe(e);
-      return x >= c.x0 - 8 && x <= c.x1 + 8 && y >= c.y0 - 8 && y <= c.y1 + 8;
+      const m = 8 / vista.current.s;
+      return x >= c.x0 - m && x <= c.x1 + m && y >= c.y0 - m && y <= c.y1 + m;
     });
   }
 
@@ -442,7 +550,7 @@ export default function Hoja({ ref, inicial, automatico, color, papel, reconocer
       return avisar();
     }
 
-    if (Math.max(ancho(c), alto(c)) < 5 && duracion < 350) {
+    if (Math.max(ancho(c), alto(c)) * vista.current.s < 5 && duracion < 350) {
       const t = elementoEn(puntos[0].x, puntos[0].y, true);
       if (t) return abrirEdicion(t.id);
     }
@@ -488,23 +596,52 @@ export default function Hoja({ ref, inicial, automatico, color, papel, reconocer
     setEditando(id);
   }
 
+  function iniciarPellizco() {
+    const d = dedo.current;
+    dedo.current = null;
+    if (d?.arrastre?.guardado) avisar();
+    if (actual.current) {
+      // Un trazo con el dedo (sin lápiz) se descarta al empezar a usar dos dedos.
+      actual.current = null;
+      if (temporizadorForma.current) clearTimeout(temporizadorForma.current);
+      dibujar();
+    }
+    const [p1, p2] = [...toques.current.values()];
+    const { s, x, y } = vista.current;
+    pellizco.current = {
+      s0: s,
+      x0: x,
+      y0: y,
+      medio0: { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 },
+      d0: Math.max(10, dist(p1, p2)),
+    };
+    ignorarDedos.current = true;
+  }
+
   function alBajar(e: React.PointerEvent<HTMLCanvasElement>) {
     if (e.pointerType === "pen") usaLapiz.current = true;
     if (editando) setEditando(null);
 
-    if (e.pointerType === "touch" && usaLapiz.current) {
-      // Con el lápiz en uso, el dedo no dibuja: mueve formas y textos, toca para editar y desliza para deshacer/rehacer.
-      if (dedo.current || e.width > 40) return; // otro dedo o la palma
-      const p = puntoDe(e);
-      const el = elementoEn(p.x, p.y);
-      dedo.current = {
-        id: e.pointerId,
-        x: e.clientX,
-        y: e.clientY,
-        t: Date.now(),
-        arrastre: el ? { elementoId: el.id, original: el, guardado: false } : null,
-      };
-      return;
+    if (e.pointerType === "touch") {
+      // Mientras el lápiz escribe, cualquier toque es la mano apoyada.
+      if (actual.current && usaLapiz.current) return;
+      if (e.width > 40) return; // la palma
+      toques.current.set(e.pointerId, enPantalla(e));
+      if (toques.current.size === 2) return iniciarPellizco();
+      if (toques.current.size > 2 || ignorarDedos.current) return;
+      if (usaLapiz.current) {
+        // Con el lápiz en uso, un dedo no dibuja: mueve formas y textos, toca para editar y desliza para deshacer/rehacer.
+        const p = puntoDe(e);
+        const el = elementoEn(p.x, p.y);
+        dedo.current = {
+          id: e.pointerId,
+          x: e.clientX,
+          y: e.clientY,
+          t: Date.now(),
+          arrastre: el ? { elementoId: el.id, original: el, guardado: false } : null,
+        };
+        return;
+      }
     }
 
     if (actual.current) return;
@@ -519,11 +656,29 @@ export default function Hoja({ ref, inicial, automatico, color, papel, reconocer
     actual.current = { id: e.pointerId, puntos: [p], inicio: Date.now(), quieto: p, forma: null, flechaDe: null };
     if (temporizadorForma.current) clearTimeout(temporizadorForma.current);
     const ctx = e.currentTarget.getContext("2d")!;
+    aplicarVista(ctx);
     prepararPincel(ctx, pintura(props.current.color));
     dibujarTrazo(ctx, actual.current.puntos);
   }
 
   function alMover(e: React.PointerEvent<HTMLCanvasElement>) {
+    if (e.pointerType === "touch" && toques.current.has(e.pointerId)) {
+      toques.current.set(e.pointerId, enPantalla(e));
+      const pz = pellizco.current;
+      if (pz && toques.current.size >= 2) {
+        const [p1, p2] = [...toques.current.values()];
+        const medioActual = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+        const s2 = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, (pz.s0 * dist(p1, p2)) / pz.d0));
+        // El punto del mundo que estaba bajo el centro de los dedos sigue bajo los dedos.
+        cambiarVista({
+          s: s2,
+          x: medioActual.x - ((pz.medio0.x - pz.x0) / pz.s0) * s2,
+          y: medioActual.y - ((pz.medio0.y - pz.y0) / pz.s0) * s2,
+        });
+        return;
+      }
+    }
+
     const d = dedo.current;
     if (d && e.pointerId === d.id) {
       if (!d.arrastre) return;
@@ -533,7 +688,8 @@ export default function Hoja({ ref, inicial, automatico, color, papel, reconocer
         guardarEstado();
         d.arrastre.guardado = true;
       }
-      const movido = moverElemento(d.arrastre.original, dx, dy);
+      const s = vista.current.s;
+      const movido = moverElemento(d.arrastre.original, dx / s, dy / s);
       doc.current = { ...doc.current, elementos: doc.current.elementos.map((x) => (x.id === movido.id ? movido : x)) };
       dibujar();
       return;
@@ -542,16 +698,18 @@ export default function Hoja({ ref, inicial, automatico, color, papel, reconocer
     const a = actual.current;
     if (!a || e.pointerId !== a.id) return;
     const ctx = e.currentTarget.getContext("2d")!;
+    aplicarVista(ctx);
     prepararPincel(ctx, pintura(props.current.color));
+    const escala = vista.current.s;
     const agrupados = e.nativeEvent.getCoalescedEvents?.() ?? [];
     for (const ev of agrupados.length > 0 ? agrupados : [e.nativeEvent]) {
       const nuevo = puntoDe(ev);
-      if (dist(nuevo, a.puntos[a.puntos.length - 1]) < 0.75) continue;
+      if (dist(nuevo, a.puntos[a.puntos.length - 1]) * escala < 0.75) continue;
       a.puntos.push(nuevo);
       if (!a.forma && a.puntos.length >= 3) dibujarTramo(ctx, a.puntos, a.puntos.length - 2);
     }
     const ultimo = a.puntos[a.puntos.length - 1];
-    if (dist(ultimo, a.quieto) > TOLERANCIA_QUIETO) {
+    if (dist(ultimo, a.quieto) * escala > TOLERANCIA_QUIETO) {
       a.quieto = ultimo;
       if (a.forma) {
         // Se volvió a mover después de convertirse: sigue como tinta.
@@ -565,6 +723,17 @@ export default function Hoja({ ref, inicial, automatico, color, papel, reconocer
   }
 
   function alSubir(e: React.PointerEvent<HTMLCanvasElement>) {
+    if (e.pointerType === "touch" && toques.current.has(e.pointerId)) {
+      toques.current.delete(e.pointerId);
+      if (toques.current.size < 2) pellizco.current = null;
+      if (ignorarDedos.current) {
+        // Termina un gesto de dos dedos: los dedos que quedan no hacen nada hasta levantarse.
+        if (toques.current.size === 0) ignorarDedos.current = false;
+        dedo.current = null;
+        return;
+      }
+    }
+
     const d = dedo.current;
     if (d && d.id === e.pointerId) {
       dedo.current = null;
@@ -608,7 +777,7 @@ export default function Hoja({ ref, inicial, automatico, color, papel, reconocer
     <div ref={contenedor} className="relative">
       <canvas
         ref={lienzo}
-        className={`hoja papel-${papel} block h-[72vh] min-h-96 w-full rounded-xl border border-black/10 text-neutral-900 dark:border-white/10 dark:text-neutral-100`}
+        className={`hoja block h-[72vh] min-h-96 w-full rounded-xl border border-black/10 text-neutral-900 dark:border-white/10 dark:text-neutral-100`}
         onPointerDown={alBajar}
         onPointerMove={alMover}
         onPointerUp={alSubir}
@@ -618,8 +787,11 @@ export default function Hoja({ ref, inicial, automatico, color, papel, reconocer
         <div
           className="seleccionable absolute z-10 w-72 max-w-[calc(100%-1rem)] rounded-xl border border-black/10 bg-white p-2 shadow-lg dark:border-white/10 dark:bg-neutral-800"
           style={{
-            left: Math.max(8, Math.min(textoEditado.x, (contenedor.current?.clientWidth ?? 400) - 296)),
-            top: textoEditado.y,
+            left: Math.max(
+              8,
+              Math.min(textoEditado.x * vista.current.s + vista.current.x, (contenedor.current?.clientWidth ?? 400) - 296),
+            ),
+            top: Math.max(8, textoEditado.y * vista.current.s + vista.current.y),
           }}
         >
           <textarea

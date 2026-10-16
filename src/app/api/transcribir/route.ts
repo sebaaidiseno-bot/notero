@@ -1,4 +1,4 @@
-import { ApiError, GoogleGenAI } from "@google/genai";
+import { ApiError, GoogleGenAI, ThinkingLevel } from "@google/genai";
 import { z } from "zod";
 import { Reconocimiento } from "@/lib/esquema";
 
@@ -59,7 +59,8 @@ export async function POST(req: Request) {
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
   try {
-    const pedir = (model: string) =>
+    // Leer escritura no requiere mucho razonamiento: pensar poco hace la respuesta bastante más rápida.
+    const pedir = (model: string, pensarPoco: boolean) =>
       ai.models.generateContent({
         model,
         contents: [
@@ -78,21 +79,27 @@ export async function POST(req: Request) {
           systemInstruction: SISTEMA,
           responseMimeType: "application/json",
           responseJsonSchema: ESQUEMA_JSON,
+          ...(pensarPoco ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {}),
         },
       });
 
     let respuesta: Awaited<ReturnType<typeof pedir>> | undefined;
     let ultimoError: unknown;
     for (const modelo of MODELOS) {
-      for (let intento = 0; intento < 2 && !respuesta; intento++) {
+      let pensarPoco = true;
+      for (let intento = 0; intento < 3 && !respuesta; intento++) {
         try {
-          respuesta = await pedir(modelo);
+          respuesta = await pedir(modelo, pensarPoco);
         } catch (e) {
           if (!(e instanceof ApiError)) throw e;
           ultimoError = e;
           if (e.status === 404) break; // modelo no disponible para esta clave: pasar al siguiente
+          if (e.status === 400 && pensarPoco) {
+            pensarPoco = false; // el modelo no acepta el nivel de razonamiento: reintentar sin él
+            continue;
+          }
           if (!REINTENTABLE.has(e.status)) throw e;
-          if (intento === 0) await esperar(3000);
+          await esperar(2000);
         }
       }
       if (respuesta) break;
