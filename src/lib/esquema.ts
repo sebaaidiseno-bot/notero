@@ -1,9 +1,9 @@
 import { z } from "zod";
 
-export const Reconocimiento = z.object({
+const Bloque = z.object({
   texto: z
     .string()
-    .describe("Transcripción literal del texto manuscrito, respetando saltos de línea, sangrías y símbolos"),
+    .describe("Transcripción literal del texto manuscrito de esa imagen, respetando saltos de línea y símbolos"),
   dudas: z
     .array(
       z.object({
@@ -14,5 +14,10 @@ export const Reconocimiento = z.object({
     .describe("Palabras que no se leyeron con seguridad"),
 });
 
+export const Reconocimiento = z.object({
+  bloques: z.array(Bloque).describe("Un bloque por imagen recibida, en el mismo orden"),
+});
+
 export type Reconocimiento = z.infer<typeof Reconocimiento>;
-export type Duda = Reconocimiento["dudas"][number];
+export type Bloque = z.infer<typeof Bloque>;
+export type Duda = Bloque["dudas"][number];

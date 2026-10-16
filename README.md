@@ -4,10 +4,14 @@ App web para escribir a mano alzada en el iPad (con Apple Pencil) y convertirlo 
 
 ## Cómo funciona
 
-1. Escribes en la hoja con el lápiz. Mientras usas el lápiz, los toques con la mano se ignoran (rechazo de palma).
-2. "Convertir a texto" recorta lo escrito, lo envía como imagen a `/api/transcribir` y Gemini devuelve la transcripción literal (respetando líneas y símbolos como `*`, `→`, `↳`, `//`).
-3. El texto se suma a la casilla de abajo (se guarda en el navegador), se puede editar y copiar. Las palabras dudosas aparecen con alternativas para elegir.
-4. "Convertir una foto" hace lo mismo con una foto (acepta HEIC del iPhone).
+Inspirada en la tinta interactiva de MyScript, pero con Gemini como lector de escritura:
+
+- **Conversión en el lugar:** al hacer una pausa de 1,5 s, la tinta se agrupa en renglones, se envía a Gemini (una sola solicitud por pausa) y cada renglón se reemplaza por texto escrito en el mismo sitio. Se puede desactivar ("Convertir al pausar") y convertir a mano.
+- **Gestos:** tachar en zigzag borra lo que esté debajo; una raya horizontal sobre texto convertido lo borra; tocar un texto abre un editor con alternativas y la opción de borrar.
+- **Formas y diagramas:** círculos/elipses, rectángulos, triángulos, rombos, líneas y flechas dibujados en tamaño grande se reconocen en el propio dispositivo (sin llamar a Gemini) y se dibujan en limpio. Una línea seguida de una "V" en un extremo se vuelve flecha.
+- **Rechazo de palma:** con el Apple Pencil en uso, el dedo no dibuja (solo sirve para tocar textos).
+- La hoja se guarda en el navegador y tiene deshacer. Abajo aparece el texto de la hoja listo para copiar.
+- "Convertir una foto" transcribe una foto de un cuaderno (acepta HEIC).
 
 El glosario de siglas y nombres (`src/lib/glosario.ts`, editable en la app) ayuda a leer nombres propios.
 
@@ -27,10 +31,12 @@ npm run dev
 
 ## Estructura
 
-- `src/app/page.tsx`: pantalla principal (hoja, texto, glosario).
-- `src/components/Lienzo.tsx`: hoja para escribir con lápiz (presión, rechazo de palma, deshacer, exportar).
+- `src/app/page.tsx`: pantalla principal (barra, hoja, texto, foto, glosario).
+- `src/components/Hoja.tsx`: hoja interactiva (tinta, conversión en el lugar, gestos, formas, editor de texto).
+- `src/lib/hoja/geometria.ts`: reconocimiento de formas, gestos y agrupación en renglones.
+- `src/lib/hoja/texto.ts`: texto plano de la hoja en orden de lectura.
 - `src/app/api/transcribir/route.ts`: llamada a Gemini con reintentos y modelos de respaldo.
-- `src/lib/esquema.ts`: formato de la respuesta (texto y palabras dudosas).
+- `src/lib/esquema.ts`: formato de la respuesta (un bloque de texto y sus palabras dudosas por imagen).
 - `src/lib/imagen.ts`: conversión HEIC y reducción de fotos.
 
 ## Usar en iPad

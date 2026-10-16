@@ -25,6 +25,7 @@ La persona suele usar estos símbolos; transcríbelos con el carácter más pare
 ${SIMBOLOGIA}
 
 Cómo trabajar:
+- Recibirás una o más imágenes numeradas. Cada una es un renglón escrito con lápiz en un iPad, o una foto de una página. Devuelve exactamente un bloque por imagen, en el mismo orden.
 - Transcribe de forma literal: no resumas, no reordenes, no corrijas el estilo ni agregues nada que no esté escrito.
 - Respeta los saltos de línea y la sangría de cada línea (usa espacios para la sangría).
 - Si la imagen viene girada, léela igual en el orden correcto.
@@ -52,8 +53,8 @@ export async function POST(req: Request) {
     return Response.json({ error: "Solicitud inválida." }, { status: 400 });
   }
   const imagenes = cuerpo.imagenes ?? [];
-  if (imagenes.length === 0 || imagenes.length > 6) {
-    return Response.json({ error: "Envía entre 1 y 6 imágenes." }, { status: 400 });
+  if (imagenes.length === 0 || imagenes.length > 20) {
+    return Response.json({ error: "Envía entre 1 y 20 imágenes." }, { status: 400 });
   }
 
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -66,8 +67,12 @@ export async function POST(req: Request) {
           {
             role: "user",
             parts: [
-              ...imagenes.map((img) => ({ inlineData: { mimeType: img.media_type, data: img.data } })),
-              { text: `Glosario de siglas y nombres frecuentes:\n${cuerpo.glosario ?? ""}\n\nTranscribe el texto manuscrito.` },
+              { text: `Glosario de siglas y nombres frecuentes:\n${cuerpo.glosario ?? ""}` },
+              ...imagenes.flatMap((img, i) => [
+                { text: `Imagen ${i + 1}:` },
+                { inlineData: { mimeType: img.media_type, data: img.data } },
+              ]),
+              { text: `Transcribe las ${imagenes.length} imágenes: un bloque por imagen, en orden.` },
             ],
           },
         ],
@@ -114,7 +119,9 @@ export async function POST(req: Request) {
     if (!resultado.success) {
       return Response.json({ error: "La respuesta no tuvo el formato esperado. Intenta de nuevo." }, { status: 502 });
     }
-    return Response.json({ resultado: resultado.data });
+    // Garantiza un bloque por imagen aunque el modelo devuelva de más o de menos.
+    const bloques = imagenes.map((_, i) => resultado.data.bloques[i] ?? { texto: "", dudas: [] });
+    return Response.json({ resultado: { bloques } });
   } catch (error) {
     if (error instanceof ApiError) {
       if (error.status === 400 || error.status === 401 || error.status === 403) {
