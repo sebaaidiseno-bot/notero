@@ -37,18 +37,47 @@ body {
   }
 }
 
-/* Hoja para escribir: renglones de fondo (no salen en la imagen enviada) y sin gestos del navegador. */
-.hoja {
-  touch-action: none;
-  user-select: none;
+/* El lápiz no debe seleccionar texto de la interfaz ni abrir la lupa: solo las casillas son seleccionables. */
+body {
   -webkit-user-select: none;
+  user-select: none;
   -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+input,
+textarea,
+.seleccionable {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Hoja para escribir: el papel es solo fondo (no sale en la imagen enviada) y sin gestos del navegador.
+   36 px ≈ 7 mm en la pantalla de un iPad. */
+.hoja {
+  --paso: 36px;
+  --trazo-papel: rgb(0 0 0 / 0.08);
+  --punto-papel: rgb(0 0 0 / 0.28);
+  touch-action: none;
   background-color: #fffefa;
-  background-image: repeating-linear-gradient(to bottom, transparent 0 39px, rgb(0 0 0 / 0.07) 39px 40px);
 }
 @media (prefers-color-scheme: dark) {
   .hoja {
+    --trazo-papel: rgb(255 255 255 / 0.09);
+    --punto-papel: rgb(255 255 255 / 0.3);
     background-color: #1d1c1a;
-    background-image: repeating-linear-gradient(to bottom, transparent 0 39px, rgb(255 255 255 / 0.08) 39px 40px);
   }
+}
+.papel-lineas {
+  background-image: repeating-linear-gradient(to bottom, transparent 0 calc(var(--paso) - 1px), var(--trazo-papel) calc(var(--paso) - 1px) var(--paso));
+}
+.papel-cuadricula {
+  background-image:
+    linear-gradient(to bottom, var(--trazo-papel) 1px, transparent 1px),
+    linear-gradient(to right, var(--trazo-papel) 1px, transparent 1px);
+  background-size: var(--paso) var(--paso);
+}
+.papel-puntos {
+  background-image: radial-gradient(circle, var(--punto-papel) 1.3px, transparent 1.8px);
+  background-size: var(--paso) var(--paso);
+  background-position: calc(var(--paso) / 2) calc(var(--paso) / 2);
 }

@@ -17,31 +17,59 @@ import {
   unirCajas,
   type Caja,
 } from "@/lib/hoja/geometria";
-import type { Documento, Elemento, ElementoForma, ElementoTexto, Punto, Trazo } from "@/lib/hoja/tipos";
+import type {
+  Color,
+  Documento,
+  Elemento,
+  ElementoForma,
+  ElementoTexto,
+  Papel,
+  Punto,
+  Trazo,
+  Xy,
+} from "@/lib/hoja/tipos";
 
 export type HojaApi = {
   deshacer: () => void;
+  rehacer: () => void;
   nuevaHoja: () => void;
   convertirAhora: () => void;
 };
+
+export type EstadoHistorial = { puedeDeshacer: boolean; puedeRehacer: boolean };
 
 type Props = {
   ref: Ref<HojaApi>;
   inicial: Documento;
   automatico: boolean;
+  color: Color;
+  papel: Papel;
   reconocer: (imagenesPng: string[]) => Promise<Bloque[]>;
-  onCambio: (doc: Documento, puedeDeshacer: boolean) => void;
+  onCambio: (doc: Documento, historial: EstadoHistorial) => void;
   onError: (mensaje: string) => void;
+  onAviso: (mensaje: string) => void;
 };
 
-const GROSOR = 2.6;
-const PAUSA_MS = 1500;
+const GROSOR = 2.4;
+const PAUSA_CONVERSION_MS = 1500;
+const ESPERA_FORMA_MS = 500; // lápiz quieto al final del trazo para convertirlo en forma
+const TOLERANCIA_QUIETO = 4;
+const ALTO_MAX_RENGLON = 150; // tinta más alta se considera dibujo y no se envía a Gemini
+const DESLIZ_MIN = 90;
 const FUENTE = "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif";
 const LADO_MAXIMO_EXPORT = 1600;
 const MARGEN_EXPORT = 16;
 
+const COLORES: Record<Color, { claro: string; oscuro: string } | null> = {
+  negro: null, // usa el color del tema (negro en claro, casi blanco en oscuro)
+  rojo: { claro: "#d22b2b", oscuro: "#ff7070" },
+  azul: { claro: "#1d5fd6", oscuro: "#74a7ff" },
+};
+
 const nuevoId = () => Math.random().toString(36).slice(2, 10);
-const anchoTrazo = (p: number) => GROSOR * (0.55 + p);
+const anchoTrazo = (p: number) => GROSOR * (0.5 + p);
+const dist = (a: Xy, b: Xy) => Math.hypot(a.x - b.x, a.y - b.y);
+const medio = (a: Punto, b: Punto): Punto => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, p: (a.p + b.p) / 2 });
 
 function prepararPincel(ctx: CanvasRenderingContext2D, color: string) {
   ctx.lineCap = "round";
@@ -50,30 +78,36 @@ function prepararPincel(ctx: CanvasRenderingContext2D, color: string) {
   ctx.fillStyle = color;
 }
 
-function dibujarTrazo(ctx: CanvasRenderingContext2D, puntos: Punto[]) {
-  if (puntos.length === 1) {
-    const { x, y, p } = puntos[0];
+/** Tramo i de un trazo suavizado: curva cuadrática entre puntos medios, con el punto i como control. */
+function dibujarTramo(ctx: CanvasRenderingContext2D, pts: Punto[], i: number) {
+  const desde = i === 1 ? pts[0] : medio(pts[i - 1], pts[i]);
+  const hasta = i === pts.length - 1 ? pts[i] : medio(pts[i], pts[i + 1]);
+  const control = i === pts.length - 1 ? medio(pts[i - 1], pts[i]) : pts[i];
+  ctx.lineWidth = anchoTrazo(control.p);
+  ctx.beginPath();
+  ctx.moveTo(desde.x, desde.y);
+  ctx.quadraticCurveTo(control.x, control.y, hasta.x, hasta.y);
+  ctx.stroke();
+}
+
+function dibujarTrazo(ctx: CanvasRenderingContext2D, pts: Punto[]) {
+  if (pts.length === 1) {
+    const { x, y, p } = pts[0];
     ctx.beginPath();
     ctx.arc(x, y, anchoTrazo(p) / 2, 0, Math.PI * 2);
     ctx.fill();
     return;
   }
-  for (let i = 1; i < puntos.length; i++) {
-    const a = puntos[i - 1], b = puntos[i];
-    ctx.lineWidth = anchoTrazo((a.p + b.p) / 2);
-    ctx.beginPath();
-    ctx.moveTo(a.x, a.y);
-    ctx.lineTo(b.x, b.y);
-    ctx.stroke();
-  }
+  for (let i = 1; i < pts.length; i++) dibujarTramo(ctx, pts, i);
 }
 
-function dibujarForma(ctx: CanvasRenderingContext2D, f: ElementoForma) {
-  ctx.lineWidth = 2.5;
+function trazarForma(ctx: CanvasRenderingContext2D, f: Pick<ElementoForma, "forma" | "puntos">) {
+  ctx.lineWidth = 2.4;
   ctx.beginPath();
   const [a, b] = f.puntos;
   if (f.forma === "rect") ctx.rect(a.x, a.y, b.x - a.x, b.y - a.y);
-  else if (f.forma === "elipse") ctx.ellipse((a.x + b.x) / 2, (a.y + b.y) / 2, (b.x - a.x) / 2, (b.y - a.y) / 2, 0, 0, Math.PI * 2);
+  else if (f.forma === "elipse")
+    ctx.ellipse((a.x + b.x) / 2, (a.y + b.y) / 2, Math.abs(b.x - a.x) / 2, Math.abs(b.y - a.y) / 2, 0, 0, Math.PI * 2);
   else if (f.forma === "poligono") {
     f.puntos.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
     ctx.closePath();
@@ -92,9 +126,7 @@ function dibujarForma(ctx: CanvasRenderingContext2D, f: ElementoForma) {
   ctx.stroke();
 }
 
-function fuente(tam: number) {
-  return `${tam}px ${FUENTE}`;
-}
+const fuente = (tam: number) => `${tam}px ${FUENTE}`;
 
 function dibujarTexto(ctx: CanvasRenderingContext2D, t: ElementoTexto) {
   ctx.font = fuente(t.tam);
@@ -131,30 +163,66 @@ function exportarPng(trazos: Trazo[]): string {
 
 /** Proporción de la caja `objetivo` cubierta por `zona`. */
 function cobertura(objetivo: Caja, zona: Caja) {
-  const area = Math.max(1, ancho(objetivo) * alto(objetivo));
-  return areaInterseccion(objetivo, zona) / area;
+  return areaInterseccion(objetivo, zona) / Math.max(1, ancho(objetivo) * alto(objetivo));
 }
 
-export default function Hoja({ ref, inicial, automatico, reconocer, onCambio, onError }: Props) {
+function colorMayoritario(trazos: Trazo[]): Color {
+  const cuenta = new Map<Color, number>();
+  for (const t of trazos) cuenta.set(t.color ?? "negro", (cuenta.get(t.color ?? "negro") ?? 0) + 1);
+  return [...cuenta.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "negro";
+}
+
+function moverElemento(e: Elemento, dx: number, dy: number): Elemento {
+  if (e.tipo === "texto") return { ...e, x: e.x + dx, y: e.y + dy };
+  return { ...e, puntos: e.puntos.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
+}
+
+type TrazoEnCurso = {
+  id: number;
+  puntos: Punto[];
+  inicio: number;
+  quieto: Xy;
+  forma: Omit<ElementoForma, "id"> | null;
+  flechaDe: { lineaId: string; extremo: 0 | 1 } | null;
+};
+
+type Dedo = {
+  id: number;
+  x: number;
+  y: number;
+  t: number;
+  arrastre: { elementoId: string; original: Elemento; guardado: boolean } | null;
+};
+
+export default function Hoja({ ref, inicial, automatico, color, papel, reconocer, onCambio, onError, onAviso }: Props) {
   const contenedor = useRef<HTMLDivElement>(null);
   const lienzo = useRef<HTMLCanvasElement>(null);
   const doc = useRef<Documento>(inicial);
-  const historial = useRef<Documento[]>([]);
+  const pasado = useRef<Documento[]>([]);
+  const futuro = useRef<Documento[]>([]);
   const enVuelo = useRef(new Set<string>());
   const noLegibles = useRef(new Set<string>());
-  const actual = useRef<{ id: number; puntos: Punto[]; inicio: number } | null>(null);
-  const toqueDedo = useRef<{ id: number; x: number; y: number; t: number } | null>(null);
+  const actual = useRef<TrazoEnCurso | null>(null);
+  const dedo = useRef<Dedo | null>(null);
   const usaLapiz = useRef(false);
   const temporizador = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const ultimaLinea = useRef<{ id: string; t: number } | null>(null);
-  const automaticoRef = useRef(automatico);
+  const temporizadorForma = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ultimaLinea = useRef<string | null>(null);
+  const props = useRef({ automatico, color });
   const [editando, setEditando] = useState<string | null>(null);
+  const editandoRef = useRef<string | null>(null);
   const [, refrescar] = useState(0);
 
-  automaticoRef.current = automatico;
+  props.current = { automatico, color };
+  editandoRef.current = editando;
 
-  function colorTinta() {
-    return getComputedStyle(lienzo.current!).color;
+  function oscuro() {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  }
+  function pintura(c: Color | undefined) {
+    const def = COLORES[c ?? "negro"];
+    if (!def) return getComputedStyle(lienzo.current!).color;
+    return oscuro() ? def.oscuro : def.claro;
   }
 
   function dibujar() {
@@ -164,28 +232,55 @@ export default function Hoja({ ref, inicial, automatico, reconocer, onCambio, on
     const dpr = window.devicePixelRatio || 1;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, c.width, c.height);
-    const color = colorTinta();
-    prepararPincel(ctx, color);
     for (const e of doc.current.elementos) {
-      if (e.tipo === "forma") dibujarForma(ctx, e);
-      else if (e.id !== editando) dibujarTexto(ctx, e);
+      prepararPincel(ctx, pintura(e.color));
+      if (e.tipo === "forma") trazarForma(ctx, e);
+      else if (e.id !== editandoRef.current) dibujarTexto(ctx, e);
     }
     for (const t of doc.current.tinta) {
+      prepararPincel(ctx, pintura(t.color));
       ctx.globalAlpha = enVuelo.current.has(t.id) ? 0.35 : 1;
       dibujarTrazo(ctx, t.puntos);
     }
     ctx.globalAlpha = 1;
+    const a = actual.current;
+    if (a) {
+      prepararPincel(ctx, pintura(props.current.color));
+      if (a.forma) trazarForma(ctx, a.forma);
+      else dibujarTrazo(ctx, a.puntos);
+    }
   }
 
   function avisar() {
     dibujar();
-    onCambio(doc.current, historial.current.length > 0);
+    onCambio(doc.current, { puedeDeshacer: pasado.current.length > 0, puedeRehacer: futuro.current.length > 0 });
     refrescar((n) => n + 1);
   }
 
   function guardarEstado() {
-    historial.current.push(structuredClone(doc.current));
-    if (historial.current.length > 60) historial.current.shift();
+    pasado.current.push(structuredClone(doc.current));
+    if (pasado.current.length > 80) pasado.current.shift();
+    futuro.current = [];
+  }
+
+  function deshacer() {
+    const previo = pasado.current.pop();
+    if (!previo) return false;
+    futuro.current.push(structuredClone(doc.current));
+    doc.current = previo;
+    setEditando(null);
+    avisar();
+    return true;
+  }
+
+  function rehacer() {
+    const siguiente = futuro.current.pop();
+    if (!siguiente) return false;
+    pasado.current.push(structuredClone(doc.current));
+    doc.current = siguiente;
+    setEditando(null);
+    avisar();
+    return true;
   }
 
   useEffect(() => {
@@ -206,6 +301,7 @@ export default function Hoja({ ref, inicial, automatico, reconocer, onCambio, on
       observador.disconnect();
       tema.removeEventListener("change", dibujar);
       if (temporizador.current) clearTimeout(temporizador.current);
+      if (temporizadorForma.current) clearTimeout(temporizadorForma.current);
     };
     // Solo al montar: dibujar lee el documento desde refs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -215,16 +311,22 @@ export default function Hoja({ ref, inicial, automatico, reconocer, onCambio, on
 
   function programarConversion() {
     if (temporizador.current) clearTimeout(temporizador.current);
-    if (!automaticoRef.current) return;
-    temporizador.current = setTimeout(() => void convertirPendiente(), PAUSA_MS);
+    if (!props.current.automatico) return;
+    temporizador.current = setTimeout(() => void convertirPendiente(), PAUSA_CONVERSION_MS);
   }
 
   async function convertirPendiente() {
     if (actual.current) return programarConversion();
     const pendientes = doc.current.tinta.filter((t) => !enVuelo.current.has(t.id) && !noLegibles.current.has(t.id));
     if (pendientes.length === 0) return;
-    const grupos = agruparRenglones(pendientes);
-    for (const t of pendientes) enVuelo.current.add(t.id);
+    const grupos = agruparRenglones(pendientes).filter((g) => {
+      // Tinta muy alta es un dibujo o boceto: se queda como tinta y no gasta cuota.
+      if (alto(unirCajas(g.map(cajaTrazo))) <= ALTO_MAX_RENGLON) return true;
+      g.forEach((t) => noLegibles.current.add(t.id));
+      return false;
+    });
+    if (grupos.length === 0) return;
+    for (const g of grupos) for (const t of g) enVuelo.current.add(t.id);
     dibujar();
     try {
       const bloques = await reconocer(grupos.map(exportarPng));
@@ -257,6 +359,7 @@ export default function Hoja({ ref, inicial, automatico, reconocer, onCambio, on
               tam,
               texto,
               dudas: bloques[i].dudas ?? [],
+              color: colorMayoritario(grupo),
             },
           ],
         };
@@ -270,13 +373,8 @@ export default function Hoja({ ref, inicial, automatico, reconocer, onCambio, on
   }
 
   useImperativeHandle(ref, () => ({
-    deshacer() {
-      const previo = historial.current.pop();
-      if (!previo) return;
-      doc.current = previo;
-      setEditando(null);
-      avisar();
-    },
+    deshacer,
+    rehacer,
     nuevaHoja() {
       guardarEstado();
       doc.current = { tinta: [], elementos: [] };
@@ -295,20 +393,57 @@ export default function Hoja({ ref, inicial, automatico, reconocer, onCambio, on
     return { x: e.clientX - r.left, y: e.clientY - r.top, p };
   }
 
-  function textoEn(x: number, y: number) {
-    const textos = doc.current.elementos.filter((e): e is ElementoTexto => e.tipo === "texto");
-    return textos.reverse().find((t) => {
-      const c = cajaDe(t);
-      return x >= c.x0 - 6 && x <= c.x1 + 6 && y >= c.y0 - 6 && y <= c.y1 + 6;
+  function elementoEn(x: number, y: number, soloTexto = false) {
+    const candidatos = doc.current.elementos.filter((e) => !soloTexto || e.tipo === "texto");
+    return [...candidatos].reverse().find((e) => {
+      const c = cajaDe(e);
+      return x >= c.x0 - 8 && x <= c.x1 + 8 && y >= c.y0 - 8 && y <= c.y1 + 8;
     });
   }
 
-  function procesarTrazo(puntos: Punto[], duracion: number) {
-    const c = caja(puntos);
-    const esToque = Math.max(ancho(c), alto(c)) < 5 && duracion < 350;
+  /** Al mantener el lápiz quieto: ¿el trazo en curso es una forma, o la punta de una flecha? */
+  function intentarForma() {
+    const a = actual.current;
+    if (!a || a.forma || a.flechaDe) return;
+    const linea = doc.current.elementos.find(
+      (e): e is ElementoForma => e.id === ultimaLinea.current && e.tipo === "forma",
+    );
+    const extremo = linea ? puntaDeFlecha(a.puntos, linea) : null;
+    if (linea && extremo !== null) {
+      a.flechaDe = { lineaId: linea.id, extremo };
+      const [p0, p1] = linea.puntos;
+      a.forma = { tipo: "forma", forma: "flecha", puntos: extremo === 1 ? [p0, p1] : [p1, p0] };
+    } else {
+      a.forma = reconocerForma(a.puntos);
+    }
+    if (a.forma) dibujar();
+  }
 
-    if (esToque) {
-      const t = textoEn(puntos[0].x, puntos[0].y);
+  function procesarTrazo(a: TrazoEnCurso) {
+    const { puntos } = a;
+    const c = caja(puntos);
+    const duracion = Date.now() - a.inicio;
+
+    if (a.forma) {
+      guardarEstado();
+      if (a.flechaDe) {
+        const { lineaId } = a.flechaDe;
+        const flecha = a.forma;
+        doc.current = {
+          ...doc.current,
+          elementos: doc.current.elementos.map((e) => (e.id === lineaId ? { ...e, ...flecha, id: lineaId } : e)),
+        };
+        ultimaLinea.current = null;
+      } else {
+        const id = nuevoId();
+        doc.current = { ...doc.current, elementos: [...doc.current.elementos, { ...a.forma, id, color: props.current.color }] };
+        ultimaLinea.current = a.forma.forma === "linea" ? id : null;
+      }
+      return avisar();
+    }
+
+    if (Math.max(ancho(c), alto(c)) < 5 && duracion < 350) {
+      const t = elementoEn(puntos[0].x, puntos[0].y, true);
       if (t) return abrirEdicion(t.id);
     }
 
@@ -330,9 +465,9 @@ export default function Hoja({ ref, inicial, automatico, reconocer, onCambio, on
       const tachado = doc.current.elementos.find((e) => {
         if (e.tipo !== "texto") return false;
         const ct = cajaDe(e);
-        const medio = (c.y0 + c.y1) / 2;
+        const centro = (c.y0 + c.y1) / 2;
         const cubre = Math.min(c.x1, ct.x1) - Math.max(c.x0, ct.x0);
-        return medio > ct.y0 + alto(ct) * 0.2 && medio < ct.y1 - alto(ct) * 0.2 && cubre > 0.5 * ancho(ct);
+        return centro > ct.y0 + alto(ct) * 0.2 && centro < ct.y1 - alto(ct) * 0.2 && cubre > 0.5 * ancho(ct);
       });
       if (tachado) {
         guardarEstado();
@@ -341,31 +476,8 @@ export default function Hoja({ ref, inicial, automatico, reconocer, onCambio, on
       }
     }
 
-    const reciente = ultimaLinea.current;
-    if (reciente && Date.now() - reciente.t < 2500) {
-      const linea = doc.current.elementos.find((e): e is ElementoForma => e.id === reciente.id && e.tipo === "forma");
-      const extremo = linea ? puntaDeFlecha(puntos, linea) : null;
-      if (linea && extremo !== null) {
-        guardarEstado();
-        const [a, b] = linea.puntos;
-        const flecha: ElementoForma = { ...linea, forma: "flecha", puntos: extremo === 1 ? [a, b] : [b, a] };
-        doc.current = { ...doc.current, elementos: doc.current.elementos.map((e) => (e.id === linea.id ? flecha : e)) };
-        ultimaLinea.current = null;
-        return avisar();
-      }
-    }
-
-    const forma = reconocerForma(puntos);
-    if (forma) {
-      guardarEstado();
-      const id = nuevoId();
-      doc.current = { ...doc.current, elementos: [...doc.current.elementos, { ...forma, id }] };
-      ultimaLinea.current = forma.forma === "linea" ? { id, t: Date.now() } : null;
-      return avisar();
-    }
-
     guardarEstado();
-    doc.current = { ...doc.current, tinta: [...doc.current.tinta, { id: nuevoId(), puntos }] };
+    doc.current = { ...doc.current, tinta: [...doc.current.tinta, { id: nuevoId(), puntos, color: props.current.color }] };
     avisar();
     programarConversion();
   }
@@ -379,11 +491,22 @@ export default function Hoja({ ref, inicial, automatico, reconocer, onCambio, on
   function alBajar(e: React.PointerEvent<HTMLCanvasElement>) {
     if (e.pointerType === "pen") usaLapiz.current = true;
     if (editando) setEditando(null);
+
     if (e.pointerType === "touch" && usaLapiz.current) {
-      // Con el lápiz en uso, el dedo no dibuja: solo sirve para tocar un texto y editarlo.
-      if (e.width < 40) toqueDedo.current = { id: e.pointerId, x: e.clientX, y: e.clientY, t: Date.now() };
+      // Con el lápiz en uso, el dedo no dibuja: mueve formas y textos, toca para editar y desliza para deshacer/rehacer.
+      if (dedo.current || e.width > 40) return; // otro dedo o la palma
+      const p = puntoDe(e);
+      const el = elementoEn(p.x, p.y);
+      dedo.current = {
+        id: e.pointerId,
+        x: e.clientX,
+        y: e.clientY,
+        t: Date.now(),
+        arrastre: el ? { elementoId: el.id, original: el, guardado: false } : null,
+      };
       return;
     }
+
     if (actual.current) return;
     e.preventDefault();
     if (temporizador.current) clearTimeout(temporizador.current);
@@ -392,42 +515,78 @@ export default function Hoja({ ref, inicial, automatico, reconocer, onCambio, on
     } catch {
       // Sin captura el trazo igual funciona mientras el lápiz siga sobre la hoja.
     }
-    actual.current = { id: e.pointerId, puntos: [puntoDe(e)], inicio: Date.now() };
+    const p = puntoDe(e);
+    actual.current = { id: e.pointerId, puntos: [p], inicio: Date.now(), quieto: p, forma: null, flechaDe: null };
+    if (temporizadorForma.current) clearTimeout(temporizadorForma.current);
     const ctx = e.currentTarget.getContext("2d")!;
-    prepararPincel(ctx, colorTinta());
+    prepararPincel(ctx, pintura(props.current.color));
     dibujarTrazo(ctx, actual.current.puntos);
   }
 
   function alMover(e: React.PointerEvent<HTMLCanvasElement>) {
-    if (!actual.current || e.pointerId !== actual.current.id) return;
+    const d = dedo.current;
+    if (d && e.pointerId === d.id) {
+      if (!d.arrastre) return;
+      const dx = e.clientX - d.x, dy = e.clientY - d.y;
+      if (!d.arrastre.guardado && Math.hypot(dx, dy) < 6) return;
+      if (!d.arrastre.guardado) {
+        guardarEstado();
+        d.arrastre.guardado = true;
+      }
+      const movido = moverElemento(d.arrastre.original, dx, dy);
+      doc.current = { ...doc.current, elementos: doc.current.elementos.map((x) => (x.id === movido.id ? movido : x)) };
+      dibujar();
+      return;
+    }
+
+    const a = actual.current;
+    if (!a || e.pointerId !== a.id) return;
     const ctx = e.currentTarget.getContext("2d")!;
-    prepararPincel(ctx, colorTinta());
+    prepararPincel(ctx, pintura(props.current.color));
     const agrupados = e.nativeEvent.getCoalescedEvents?.() ?? [];
     for (const ev of agrupados.length > 0 ? agrupados : [e.nativeEvent]) {
       const nuevo = puntoDe(ev);
-      const previo = actual.current.puntos[actual.current.puntos.length - 1];
-      actual.current.puntos.push(nuevo);
-      dibujarTrazo(ctx, [previo, nuevo]);
+      if (dist(nuevo, a.puntos[a.puntos.length - 1]) < 0.75) continue;
+      a.puntos.push(nuevo);
+      if (!a.forma && a.puntos.length >= 3) dibujarTramo(ctx, a.puntos, a.puntos.length - 2);
+    }
+    const ultimo = a.puntos[a.puntos.length - 1];
+    if (dist(ultimo, a.quieto) > TOLERANCIA_QUIETO) {
+      a.quieto = ultimo;
+      if (a.forma) {
+        // Se volvió a mover después de convertirse: sigue como tinta.
+        a.forma = null;
+        a.flechaDe = null;
+        dibujar();
+      }
+      if (temporizadorForma.current) clearTimeout(temporizadorForma.current);
+      temporizadorForma.current = setTimeout(intentarForma, ESPERA_FORMA_MS);
     }
   }
 
   function alSubir(e: React.PointerEvent<HTMLCanvasElement>) {
-    const dedo = toqueDedo.current;
-    if (dedo && dedo.id === e.pointerId) {
-      toqueDedo.current = null;
-      const movido = Math.hypot(e.clientX - dedo.x, e.clientY - dedo.y);
-      if (movido < 10 && Date.now() - dedo.t < 400) {
+    const d = dedo.current;
+    if (d && d.id === e.pointerId) {
+      dedo.current = null;
+      if (d.arrastre?.guardado) return avisar();
+      const dx = e.clientX - d.x, dy = e.clientY - d.y;
+      const rapido = Date.now() - d.t < 700;
+      if (Math.hypot(dx, dy) < 10 && Date.now() - d.t < 400) {
         const p = puntoDe(e);
-        const t = textoEn(p.x, p.y);
+        const t = elementoEn(p.x, p.y, true);
         if (t) abrirEdicion(t.id);
+      } else if (rapido && Math.abs(dx) > DESLIZ_MIN && Math.abs(dy) < 0.6 * Math.abs(dx)) {
+        if (dx < 0) onAviso(deshacer() ? "Deshecho" : "Nada que deshacer");
+        else onAviso(rehacer() ? "Rehecho" : "Nada que rehacer");
       }
       return;
     }
-    if (!actual.current || e.pointerId !== actual.current.id) return;
-    const { puntos, inicio } = actual.current;
+    const a = actual.current;
+    if (!a || e.pointerId !== a.id) return;
+    if (temporizadorForma.current) clearTimeout(temporizadorForma.current);
     actual.current = null;
     if (e.type === "pointercancel") return dibujar();
-    procesarTrazo(puntos, Date.now() - inicio);
+    procesarTrazo(a);
   }
 
   const textoEditado = doc.current.elementos.find((e): e is ElementoTexto => e.id === editando && e.tipo === "texto");
@@ -449,7 +608,7 @@ export default function Hoja({ ref, inicial, automatico, reconocer, onCambio, on
     <div ref={contenedor} className="relative">
       <canvas
         ref={lienzo}
-        className="hoja block h-[70vh] min-h-96 w-full rounded-xl border border-black/10 text-neutral-900 dark:border-white/10 dark:text-neutral-100"
+        className={`hoja papel-${papel} block h-[72vh] min-h-96 w-full rounded-xl border border-black/10 text-neutral-900 dark:border-white/10 dark:text-neutral-100`}
         onPointerDown={alBajar}
         onPointerMove={alMover}
         onPointerUp={alSubir}
@@ -457,7 +616,7 @@ export default function Hoja({ ref, inicial, automatico, reconocer, onCambio, on
       />
       {textoEditado && (
         <div
-          className="absolute z-10 w-72 max-w-[calc(100%-1rem)] rounded-xl border border-black/10 bg-white p-2 shadow-lg dark:border-white/10 dark:bg-neutral-800"
+          className="seleccionable absolute z-10 w-72 max-w-[calc(100%-1rem)] rounded-xl border border-black/10 bg-white p-2 shadow-lg dark:border-white/10 dark:bg-neutral-800"
           style={{
             left: Math.max(8, Math.min(textoEditado.x, (contenedor.current?.clientWidth ?? 400) - 296)),
             top: textoEditado.y,

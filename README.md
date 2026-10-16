@@ -6,14 +6,13 @@ App web para escribir a mano alzada en el iPad (con Apple Pencil) y convertirlo 
 
 Inspirada en la tinta interactiva de MyScript, pero con Gemini como lector de escritura:
 
-- **Conversión en el lugar:** al hacer una pausa de 1,5 s, la tinta se agrupa en renglones, se envía a Gemini (una sola solicitud por pausa) y cada renglón se reemplaza por texto escrito en el mismo sitio. Se puede desactivar ("Convertir al pausar") y convertir a mano.
-- **Gestos:** tachar en zigzag borra lo que esté debajo; una raya horizontal sobre texto convertido lo borra; tocar un texto abre un editor con alternativas y la opción de borrar.
-- **Formas y diagramas:** círculos/elipses, rectángulos, triángulos, rombos, líneas y flechas dibujados en tamaño grande se reconocen en el propio dispositivo (sin llamar a Gemini) y se dibujan en limpio. Una línea seguida de una "V" en un extremo se vuelve flecha.
-- **Rechazo de palma:** con el Apple Pencil en uso, el dedo no dibuja (solo sirve para tocar textos).
-- La hoja se guarda en el navegador y tiene deshacer. Abajo aparece el texto de la hoja listo para copiar.
+- **Conversión en el lugar:** al hacer una pausa de 1,5 s, la tinta se agrupa en renglones, se envía a Gemini (una sola solicitud por pausa) y cada renglón se reemplaza por texto en el mismo sitio. La tinta muy alta (bocetos) no se envía. Se puede desactivar ("Convertir al pausar") y convertir a mano.
+- **Formas:** al terminar un trazo, dejar el lápiz quieto medio segundo lo convierte en círculo/elipse, rectángulo, triángulo, rombo, línea o flecha (reconocido en el propio dispositivo). Una "V" sostenida junto al extremo de una línea la vuelve flecha.
+- **Gestos con el lápiz:** tachar en zigzag borra lo que esté debajo; una raya horizontal sobre texto convertido lo borra; tocar un texto abre un editor con alternativas.
+- **Gestos con el dedo** (cuando se usa Apple Pencil): arrastrar formas y textos para moverlos, tocar un texto para editarlo, deslizar a la izquierda para deshacer y a la derecha para rehacer. La mano apoyada no dibuja.
+- **Tinta** negra, roja o azul; **hoja** cuadriculada (~7 mm), rayada, punteada o en blanco.
+- Trazo suavizado con curvas y grosor según la presión. La hoja se guarda en el navegador, con deshacer y rehacer.
 - "Convertir una foto" transcribe una foto de un cuaderno (acepta HEIC).
-
-El glosario de siglas y nombres (`src/lib/glosario.ts`, editable en la app) ayuda a leer nombres propios.
 
 ## Variables de entorno (Vercel → Settings → Environment Variables)
 
@@ -31,8 +30,8 @@ npm run dev
 
 ## Estructura
 
-- `src/app/page.tsx`: pantalla principal (barra, hoja, texto, foto, glosario).
-- `src/components/Hoja.tsx`: hoja interactiva (tinta, conversión en el lugar, gestos, formas, editor de texto).
+- `src/app/page.tsx`: pantalla principal (barra de herramientas, hoja, texto, foto).
+- `src/components/Hoja.tsx`: hoja interactiva (tinta, conversión en el lugar, formas, gestos, mover, deshacer/rehacer, editor de texto).
 - `src/lib/hoja/geometria.ts`: reconocimiento de formas, gestos y agrupación en renglones.
 - `src/lib/hoja/texto.ts`: texto plano de la hoja en orden de lectura.
 - `src/app/api/transcribir/route.ts`: llamada a Gemini con reintentos y modelos de respaldo.

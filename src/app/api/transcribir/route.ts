@@ -1,7 +1,6 @@
 import { ApiError, GoogleGenAI } from "@google/genai";
 import { z } from "zod";
 import { Reconocimiento } from "@/lib/esquema";
-import { SIMBOLOGIA } from "@/lib/glosario";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -21,15 +20,15 @@ type Imagen = { data: string; media_type: "image/jpeg" | "image/png" | "image/we
 
 const SISTEMA = `Transcribes texto escrito a mano en español (Chile): notas hechas con lápiz en un iPad o fotos de un cuaderno.
 
-La persona suele usar estos símbolos; transcríbelos con el carácter más parecido (*, →, ↳, //, ✓, ?, !!, ↗):
-${SIMBOLOGIA}
+Si hay símbolos (asteriscos, flechas, viñetas, marcas de verificación), transcríbelos con el carácter más parecido (*, →, ↳, //, ✓, ?, !!).
 
 Cómo trabajar:
 - Recibirás una o más imágenes numeradas. Cada una es un renglón escrito con lápiz en un iPad, o una foto de una página. Devuelve exactamente un bloque por imagen, en el mismo orden.
 - Transcribe de forma literal: no resumas, no reordenes, no corrijas el estilo ni agregues nada que no esté escrito.
 - Respeta los saltos de línea y la sangría de cada línea (usa espacios para la sangría).
 - Si la imagen viene girada, léela igual en el orden correcto.
-- Usa el glosario para reconocer nombres propios y siglas; déjalas tal como están escritas, sin expandirlas.
+- Deja las siglas y abreviaturas tal como están escritas, sin expandirlas.
+- Si una imagen no contiene escritura (es un dibujo, un boceto o un garabato), devuelve el texto vacío para ese bloque.
 - Cuando una palabra no se lea con seguridad, escribe tu mejor lectura en el texto y regístrala en "dudas" con sus alternativas.
 - Ignora tachones, garabatos sueltos y marcas que se transparentan desde la otra cara de la hoja.`;
 
@@ -46,7 +45,7 @@ export async function POST(req: Request) {
     return Response.json({ error: "Falta configurar GEMINI_API_KEY en el servidor." }, { status: 500 });
   }
 
-  let cuerpo: { imagenes?: Imagen[]; glosario?: string };
+  let cuerpo: { imagenes?: Imagen[] };
   try {
     cuerpo = await req.json();
   } catch {
@@ -67,7 +66,6 @@ export async function POST(req: Request) {
           {
             role: "user",
             parts: [
-              { text: `Glosario de siglas y nombres frecuentes:\n${cuerpo.glosario ?? ""}` },
               ...imagenes.flatMap((img, i) => [
                 { text: `Imagen ${i + 1}:` },
                 { inlineData: { mimeType: img.media_type, data: img.data } },

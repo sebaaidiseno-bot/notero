@@ -65,9 +65,9 @@ export function simplificar(puntos: Xy[], tolerancia: number): Xy[] {
   return [...izq.slice(0, -1), ...der];
 }
 
-// Tamaños mínimos para que un trazo cuente como forma y no como letra (en px de pantalla).
-const LADO_MIN_FORMA = 60;
-const LARGO_MIN_LINEA = 110;
+// Tamaños mínimos de una forma (px de pantalla); solo se evalúa si el lápiz se mantuvo quieto al final.
+const LADO_MIN_FORMA = 24;
+const LARGO_MIN_LINEA = 40;
 
 function errorElipse(puntos: Xy[], c: Caja) {
   const cx = (c.x0 + c.x1) / 2, cy = (c.y0 + c.y1) / 2;
@@ -88,7 +88,7 @@ export function reconocerForma(puntos: Xy[]): Omit<ElementoForma, "id"> | null {
   const cerrado = dist(inicio, fin) < 0.2 * Math.max(w, h) && largo > 1.4 * Math.max(w, h);
 
   if (cerrado) {
-    if (Math.min(w, h) < LADO_MIN_FORMA || Math.max(w, h) < LADO_MIN_FORMA * 1.3) return null;
+    if (Math.max(w, h) < LADO_MIN_FORMA) return null;
     const errElipse = errorElipse(puntos, c);
     if (errElipse < 0.08) return { tipo: "forma", forma: "elipse", puntos: [{ x: c.x0, y: c.y0 }, { x: c.x1, y: c.y1 }] };
 
