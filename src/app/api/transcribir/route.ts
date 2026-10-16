@@ -6,7 +6,16 @@ import { SIMBOLOGIA } from "@/lib/glosario";
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-const MODELO = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+// Si un modelo está saturado (503) o sin cuota (429), se reintenta y luego se prueba el siguiente.
+const MODELOS = [
+  ...(process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL] : []),
+  "gemini-3.8-flash",
+  "gemini-3.6-flash",
+  "gemini-3.5-flash-lite",
+].filter((m, i, lista) => lista.indexOf(m) === i);
+
+const REINTENTABLE = new Set([429, 500, 503, 504]);
+const esperar = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 type Imagen = { data: string; media_type: "image/jpeg" | "image/png" | "image/webp" };
 
@@ -50,23 +59,42 @@ export async function POST(req: Request) {
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
   try {
-    const respuesta = await ai.models.generateContent({
-      model: MODELO,
-      contents: [
-        {
-          role: "user",
-          parts: [
-            ...imagenes.map((img) => ({ inlineData: { mimeType: img.media_type, data: img.data } })),
-            { text: `Glosario de siglas y nombres frecuentes:\n${cuerpo.glosario ?? ""}\n\nTranscribe estas páginas.` },
-          ],
+    const pedir = (model: string) =>
+      ai.models.generateContent({
+        model,
+        contents: [
+          {
+            role: "user",
+            parts: [
+              ...imagenes.map((img) => ({ inlineData: { mimeType: img.media_type, data: img.data } })),
+              { text: `Glosario de siglas y nombres frecuentes:\n${cuerpo.glosario ?? ""}\n\nTranscribe estas páginas.` },
+            ],
+          },
+        ],
+        config: {
+          systemInstruction: SISTEMA,
+          responseMimeType: "application/json",
+          responseJsonSchema: ESQUEMA_JSON,
         },
-      ],
-      config: {
-        systemInstruction: SISTEMA,
-        responseMimeType: "application/json",
-        responseJsonSchema: ESQUEMA_JSON,
-      },
-    });
+      });
+
+    let respuesta: Awaited<ReturnType<typeof pedir>> | undefined;
+    let ultimoError: unknown;
+    for (const modelo of MODELOS) {
+      for (let intento = 0; intento < 2 && !respuesta; intento++) {
+        try {
+          respuesta = await pedir(modelo);
+        } catch (e) {
+          if (!(e instanceof ApiError)) throw e;
+          ultimoError = e;
+          if (e.status === 404) break; // modelo no disponible para esta clave: pasar al siguiente
+          if (!REINTENTABLE.has(e.status)) throw e;
+          if (intento === 0) await esperar(3000);
+        }
+      }
+      if (respuesta) break;
+    }
+    if (!respuesta) throw ultimoError;
 
     const texto = respuesta.text;
     if (!texto) {
@@ -94,6 +122,12 @@ export async function POST(req: Request) {
       }
       if (error.status === 429) {
         return Response.json({ error: "Se alcanzó el límite gratuito de Gemini; intenta más tarde." }, { status: 429 });
+      }
+      if (error.status === 503 || error.status === 500 || error.status === 504) {
+        return Response.json(
+          { error: "Los servidores de Gemini están saturados en este momento. Intenta de nuevo en unos minutos." },
+          { status: 503 },
+        );
       }
       return Response.json({ error: `Error de Gemini (${error.status}).` }, { status: 502 });
     }
