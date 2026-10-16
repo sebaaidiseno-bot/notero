@@ -236,6 +236,12 @@ export default function Hoja({
   const toques = useRef(new Map<number, Xy>());
   const pellizco = useRef<Pellizco | null>(null);
   const ignorarDedos = useRef(false);
+  const ignorados = useRef(new Set<number>());
+  const manejadoresDedos = useRef<{
+    inicio: (e: TouchEvent) => void;
+    mover: (e: TouchEvent) => void;
+    fin: (e: TouchEvent) => void;
+  } | null>(null);
   const [editando, setEditando] = useState<string | null>(null);
   const editandoRef = useRef<string | null>(null);
   const [, refrescar] = useState(0);
@@ -393,7 +399,25 @@ export default function Hoja({
       else cambiarVista({ ...vista.current, x: vista.current.x - e.deltaX, y: vista.current.y - e.deltaY });
     };
     c.addEventListener("wheel", rueda, { passive: false });
+    const inicio = (e: TouchEvent) => manejadoresDedos.current?.inicio(e);
+    const mover = (e: TouchEvent) => manejadoresDedos.current?.mover(e);
+    const fin = (e: TouchEvent) => manejadoresDedos.current?.fin(e);
+    const opciones = { passive: false } as const;
+    c.addEventListener("touchstart", inicio, opciones);
+    c.addEventListener("touchmove", mover, opciones);
+    c.addEventListener("touchend", fin, opciones);
+    c.addEventListener("touchcancel", fin, opciones);
+    // Safari: evita su propio zoom de página con el pellizco sobre la hoja.
+    const bloquear = (e: Event) => e.preventDefault();
+    c.addEventListener("gesturestart", bloquear, opciones);
+    c.addEventListener("gesturechange", bloquear, opciones);
     return () => {
+      c.removeEventListener("touchstart", inicio);
+      c.removeEventListener("touchmove", mover);
+      c.removeEventListener("touchend", fin);
+      c.removeEventListener("touchcancel", fin);
+      c.removeEventListener("gesturestart", bloquear);
+      c.removeEventListener("gesturechange", bloquear);
       observador.disconnect();
       tema.removeEventListener("change", dibujar);
       c.removeEventListener("wheel", rueda);
@@ -596,16 +620,22 @@ export default function Hoja({
     setEditando(id);
   }
 
+  // ---------- Dedos (eventos táctiles de Safari: permiten bloquear sus gestos y distinguir lápiz de dedo) ----------
+
+  function cancelarGestosDeDedo() {
+    const d = dedo.current;
+    dedo.current = null;
+    if (d?.arrastre?.guardado) avisar();
+    pellizco.current = null;
+    for (const id of toques.current.keys()) ignorados.current.add(id);
+    toques.current.clear();
+    ignorarDedos.current = false;
+  }
+
   function iniciarPellizco() {
     const d = dedo.current;
     dedo.current = null;
     if (d?.arrastre?.guardado) avisar();
-    if (actual.current) {
-      // Un trazo con el dedo (sin lápiz) se descarta al empezar a usar dos dedos.
-      actual.current = null;
-      if (temporizadorForma.current) clearTimeout(temporizadorForma.current);
-      dibujar();
-    }
     const [p1, p2] = [...toques.current.values()];
     const { s, x, y } = vista.current;
     pellizco.current = {
@@ -618,32 +648,109 @@ export default function Hoja({
     ignorarDedos.current = true;
   }
 
-  function alBajar(e: React.PointerEvent<HTMLCanvasElement>) {
-    if (e.pointerType === "pen") usaLapiz.current = true;
-    if (editando) setEditando(null);
-
-    if (e.pointerType === "touch") {
-      // Mientras el lápiz escribe, cualquier toque es la mano apoyada.
-      if (actual.current && usaLapiz.current) return;
-      if (e.width > 40) return; // la palma
-      toques.current.set(e.pointerId, enPantalla(e));
-      if (toques.current.size === 2) return iniciarPellizco();
-      if (toques.current.size > 2 || ignorarDedos.current) return;
-      if (usaLapiz.current) {
-        // Con el lápiz en uso, un dedo no dibuja: mueve formas y textos, toca para editar y desliza para deshacer/rehacer.
-        const p = puntoDe(e);
+  function dedosInicio(e: TouchEvent) {
+    e.preventDefault();
+    if (editandoRef.current) setEditando(null);
+    for (const t of Array.from(e.changedTouches)) {
+      // Safari indica "stylus" para el Apple Pencil, que se maneja con eventos de puntero.
+      if ((t as Touch & { touchType?: string }).touchType === "stylus") continue;
+      if (actual.current) {
+        ignorados.current.add(t.identifier); // la mano apoyada mientras se escribe
+        continue;
+      }
+      toques.current.set(t.identifier, enPantalla(t));
+      if (toques.current.size === 2) iniciarPellizco();
+      else if (toques.current.size === 1 && !ignorarDedos.current) {
+        const p = puntoDe({ clientX: t.clientX, clientY: t.clientY, pointerType: "touch", pressure: 0.5 });
         const el = elementoEn(p.x, p.y);
         dedo.current = {
-          id: e.pointerId,
-          x: e.clientX,
-          y: e.clientY,
+          id: t.identifier,
+          x: t.clientX,
+          y: t.clientY,
           t: Date.now(),
           arrastre: el ? { elementoId: el.id, original: el, guardado: false } : null,
         };
-        return;
       }
     }
+  }
 
+  function dedosMover(e: TouchEvent) {
+    e.preventDefault();
+    for (const t of Array.from(e.changedTouches)) {
+      if (toques.current.has(t.identifier)) toques.current.set(t.identifier, enPantalla(t));
+    }
+    const pz = pellizco.current;
+    if (pz && toques.current.size >= 2) {
+      const [p1, p2] = [...toques.current.values()];
+      const medioActual = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+      const s2 = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, (pz.s0 * dist(p1, p2)) / pz.d0));
+      // El punto del mundo que estaba bajo el centro de los dedos sigue bajo los dedos.
+      cambiarVista({
+        s: s2,
+        x: medioActual.x - ((pz.medio0.x - pz.x0) / pz.s0) * s2,
+        y: medioActual.y - ((pz.medio0.y - pz.y0) / pz.s0) * s2,
+      });
+      return;
+    }
+    const d = dedo.current;
+    const t = d && Array.from(e.changedTouches).find((x) => x.identifier === d.id);
+    if (!d || !t || !d.arrastre) return;
+    const dx = t.clientX - d.x, dy = t.clientY - d.y;
+    if (!d.arrastre.guardado && Math.hypot(dx, dy) < 6) return;
+    if (!d.arrastre.guardado) {
+      guardarEstado();
+      d.arrastre.guardado = true;
+    }
+    const s = vista.current.s;
+    const movido = moverElemento(d.arrastre.original, dx / s, dy / s);
+    doc.current = { ...doc.current, elementos: doc.current.elementos.map((x) => (x.id === movido.id ? movido : x)) };
+    dibujar();
+  }
+
+  function dedosFin(e: TouchEvent) {
+    e.preventDefault();
+    for (const t of Array.from(e.changedTouches)) {
+      if (ignorados.current.delete(t.identifier)) continue;
+      if (!toques.current.delete(t.identifier)) continue;
+      if (toques.current.size < 2) pellizco.current = null;
+      if (ignorarDedos.current) {
+        // Termina un gesto de dos dedos: los dedos que quedan no hacen nada hasta levantarse.
+        if (toques.current.size === 0) ignorarDedos.current = false;
+        dedo.current = null;
+        continue;
+      }
+      const d = dedo.current;
+      if (!d || d.id !== t.identifier) continue;
+      dedo.current = null;
+      if (e.type === "touchcancel") continue;
+      if (d.arrastre?.guardado) {
+        avisar();
+        continue;
+      }
+      const dx = t.clientX - d.x, dy = t.clientY - d.y;
+      const duracion = Date.now() - d.t;
+      if (Math.hypot(dx, dy) < 10 && duracion < 400) {
+        const p = puntoDe({ clientX: t.clientX, clientY: t.clientY, pointerType: "touch", pressure: 0.5 });
+        const texto = elementoEn(p.x, p.y, true);
+        if (texto) abrirEdicion(texto.id);
+      } else if (duracion < 700 && Math.abs(dx) > DESLIZ_MIN && Math.abs(dy) < 0.6 * Math.abs(dx)) {
+        if (dx < 0) onAviso(deshacer() ? "Deshecho" : "Nada que deshacer");
+        else onAviso(rehacer() ? "Rehecho" : "Nada que rehacer");
+      }
+    }
+  }
+
+  manejadoresDedos.current = { inicio: dedosInicio, mover: dedosMover, fin: dedosFin };
+
+  // ---------- Lápiz y mouse (eventos de puntero) ----------
+
+  function alBajar(e: React.PointerEvent<HTMLCanvasElement>) {
+    if (e.pointerType === "touch") return; // los dedos van por los eventos táctiles
+    if (e.pointerType === "pen") {
+      usaLapiz.current = true;
+      cancelarGestosDeDedo(); // si la mano tocó antes que el lápiz, ese "dedo" era la palma
+    }
+    if (editando) setEditando(null);
     if (actual.current) return;
     e.preventDefault();
     if (temporizador.current) clearTimeout(temporizador.current);
@@ -662,39 +769,6 @@ export default function Hoja({
   }
 
   function alMover(e: React.PointerEvent<HTMLCanvasElement>) {
-    if (e.pointerType === "touch" && toques.current.has(e.pointerId)) {
-      toques.current.set(e.pointerId, enPantalla(e));
-      const pz = pellizco.current;
-      if (pz && toques.current.size >= 2) {
-        const [p1, p2] = [...toques.current.values()];
-        const medioActual = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
-        const s2 = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, (pz.s0 * dist(p1, p2)) / pz.d0));
-        // El punto del mundo que estaba bajo el centro de los dedos sigue bajo los dedos.
-        cambiarVista({
-          s: s2,
-          x: medioActual.x - ((pz.medio0.x - pz.x0) / pz.s0) * s2,
-          y: medioActual.y - ((pz.medio0.y - pz.y0) / pz.s0) * s2,
-        });
-        return;
-      }
-    }
-
-    const d = dedo.current;
-    if (d && e.pointerId === d.id) {
-      if (!d.arrastre) return;
-      const dx = e.clientX - d.x, dy = e.clientY - d.y;
-      if (!d.arrastre.guardado && Math.hypot(dx, dy) < 6) return;
-      if (!d.arrastre.guardado) {
-        guardarEstado();
-        d.arrastre.guardado = true;
-      }
-      const s = vista.current.s;
-      const movido = moverElemento(d.arrastre.original, dx / s, dy / s);
-      doc.current = { ...doc.current, elementos: doc.current.elementos.map((x) => (x.id === movido.id ? movido : x)) };
-      dibujar();
-      return;
-    }
-
     const a = actual.current;
     if (!a || e.pointerId !== a.id) return;
     const ctx = e.currentTarget.getContext("2d")!;
@@ -723,33 +797,6 @@ export default function Hoja({
   }
 
   function alSubir(e: React.PointerEvent<HTMLCanvasElement>) {
-    if (e.pointerType === "touch" && toques.current.has(e.pointerId)) {
-      toques.current.delete(e.pointerId);
-      if (toques.current.size < 2) pellizco.current = null;
-      if (ignorarDedos.current) {
-        // Termina un gesto de dos dedos: los dedos que quedan no hacen nada hasta levantarse.
-        if (toques.current.size === 0) ignorarDedos.current = false;
-        dedo.current = null;
-        return;
-      }
-    }
-
-    const d = dedo.current;
-    if (d && d.id === e.pointerId) {
-      dedo.current = null;
-      if (d.arrastre?.guardado) return avisar();
-      const dx = e.clientX - d.x, dy = e.clientY - d.y;
-      const rapido = Date.now() - d.t < 700;
-      if (Math.hypot(dx, dy) < 10 && Date.now() - d.t < 400) {
-        const p = puntoDe(e);
-        const t = elementoEn(p.x, p.y, true);
-        if (t) abrirEdicion(t.id);
-      } else if (rapido && Math.abs(dx) > DESLIZ_MIN && Math.abs(dy) < 0.6 * Math.abs(dx)) {
-        if (dx < 0) onAviso(deshacer() ? "Deshecho" : "Nada que deshacer");
-        else onAviso(rehacer() ? "Rehecho" : "Nada que rehacer");
-      }
-      return;
-    }
     const a = actual.current;
     if (!a || e.pointerId !== a.id) return;
     if (temporizadorForma.current) clearTimeout(temporizadorForma.current);
